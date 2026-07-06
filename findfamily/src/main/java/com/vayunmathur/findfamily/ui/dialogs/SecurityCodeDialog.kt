@@ -26,9 +26,9 @@ import com.vayunmathur.findfamily.util.FindFamilyViewModel
  */
 @Composable
 fun SecurityCodeDialog(user: User, ffViewModel: FindFamilyViewModel, onDismiss: () -> Unit) {
-    var code by remember(user.id) { mutableStateOf<String?>(null) }
-    var loading by remember(user.id) { mutableStateOf(true) }
-    LaunchedEffect(user.id) {
+    var code by remember(user.id, user.encryptionKey) { mutableStateOf<String?>(null) }
+    var loading by remember(user.id, user.encryptionKey) { mutableStateOf(true) }
+    LaunchedEffect(user.id, user.encryptionKey) {
         code = ffViewModel.securityCodeFor(user)
         loading = false
     }
@@ -42,11 +42,13 @@ fun SecurityCodeDialog(user: User, ffViewModel: FindFamilyViewModel, onDismiss: 
                 when {
                     loading -> Text("Computing…")
                     code == null -> Text("Couldn't compute yet — ${user.name}'s key isn't available. Make sure you're both connected, then try again.")
-                    else -> Text(
-                        code!!,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    else -> code?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
             }
         },

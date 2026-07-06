@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -31,11 +32,10 @@ import kotlin.time.Duration.Companion.minutes
 
 @Composable
 fun AddLinkDialog(backStack: NavBackStack<Route>, ffViewModel: FindFamilyViewModel) {
-    var name by remember { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
 
-    val expiry15min = stringResource(R.string.expiry_15_minutes)
-    val options = mapOf(
-        expiry15min to 15.minutes,
+    val options = listOf(
+        stringResource(R.string.expiry_15_minutes) to 15.minutes,
         stringResource(R.string.expiry_30_minutes) to 30.minutes,
         stringResource(R.string.expiry_1_hour) to 1.hours,
         stringResource(R.string.expiry_2_hours) to 2.hours,
@@ -46,7 +46,9 @@ fun AddLinkDialog(backStack: NavBackStack<Route>, ffViewModel: FindFamilyViewMod
         stringResource(R.string.expiry_2_days) to 2.days,
         stringResource(R.string.expiry_1_week) to 7.days
     )
-    var expiryTime by remember { mutableStateOf(expiry15min) }
+    var expiryMillis by rememberSaveable { mutableStateOf(15.minutes.inWholeMilliseconds) }
+    val expiryTime = options.firstOrNull { it.second.inWholeMilliseconds == expiryMillis }?.first
+        ?: options.first().first
 
     Dialog({backStack.pop()}) {
         Card {
@@ -55,11 +57,17 @@ fun AddLinkDialog(backStack: NavBackStack<Route>, ffViewModel: FindFamilyViewMod
 
                 OutlinedTextField(name, {name = it}, label = {Text(stringResource(R.string.add_link_label))})
 
-                DropdownField(expiryTime, { expiryTime = it }, options.keys)
+                DropdownField(expiryTime, { selected ->
+                    options.firstOrNull { it.first == selected }?.let {
+                        expiryMillis = it.second.inWholeMilliseconds
+                    }
+                }, options.map { it.first })
 
                 Button(
                     {
-                        ffViewModel.createTemporaryLink(name, options[expiryTime]!!) {
+                        val expiry = options.firstOrNull { it.second.inWholeMilliseconds == expiryMillis }?.second
+                            ?: 15.minutes
+                        ffViewModel.createTemporaryLink(name, expiry) {
                             backStack.pop()
                         }
                     },

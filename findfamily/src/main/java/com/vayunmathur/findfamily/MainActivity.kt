@@ -1,7 +1,11 @@
 package com.vayunmathur.findfamily
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -24,19 +28,20 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.findfamily.data.FFDatabase
 import com.vayunmathur.findfamily.data.LocationValue
@@ -66,6 +71,7 @@ import kotlin.time.Clock
 import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.findfamily.util.FindFamilyViewModelFactory
 import com.vayunmathur.findfamily.util.Platform
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -77,6 +83,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var waypointDao: WaypointDao
     private lateinit var locationValueDao: LocationValueDao
     private lateinit var temporaryLinkDao: TemporaryLinkDao
+    private val deepLinkUwbPeerId = MutableStateFlow<Long?>(null)
     private val ffViewModel: FindFamilyViewModel by viewModels {
         FindFamilyViewModelFactory(application, userDao, waypointDao, locationValueDao, temporaryLinkDao)
     }
@@ -90,11 +97,13 @@ class MainActivity : ComponentActivity() {
         locationValueDao = db.locationValueDao()
         temporaryLinkDao = db.temporaryLinkDao()
         val platform = Platform(this)
+        deepLinkUwbPeerId.value = intent.extractUwbPeerId()
         setContent {
             DynamicTheme {
-                val hasForeground by ffViewModel.hasForeground.collectAsState()
-                val hasCoarse by ffViewModel.hasCoarse.collectAsState()
-                val hasBackground by ffViewModel.hasBackground.collectAsState()
+                val hasForeground by ffViewModel.hasForeground.collectAsStateWithLifecycle()
+                val hasCoarse by ffViewModel.hasCoarse.collectAsStateWithLifecycle()
+                val hasBackground by ffViewModel.hasBackground.collectAsStateWithLifecycle()
+                val deepLinkPeerId by deepLinkUwbPeerId.collectAsStateWithLifecycle()
 
                 // Automatically re-check when returning from System Settings
                 val lifecycleOwner = LocalLifecycleOwner.current
@@ -116,16 +125,28 @@ class MainActivity : ComponentActivity() {
                         onPermissionsChanged = { ffViewModel.refreshPermissions() }
                     )
                 } else {
-                    val deepLinkPeerId = remember {
-                        intent?.takeIf { it.hasExtra(EXTRA_UWB_PEER_ID) }
-                            ?.getLongExtra(EXTRA_UWB_PEER_ID, -1L)
-                            ?.takeIf { it != -1L }
-                    }
-                    Navigation(platform, ffViewModel, ffViewModel.missingFeatures, deepLinkPeerId)
+                    Navigation(
+                        platform,
+                        ffViewModel,
+                        ffViewModel.missingFeatures,
+                        deepLinkPeerId,
+                        onDeepLinkConsumed = { deepLinkUwbPeerId.value = null }
+                    )
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        deepLinkUwbPeerId.value = intent.extractUwbPeerId()
+    }
+
+    private fun Intent?.extractUwbPeerId(): Long? =
+        this?.takeIf { it.hasExtra(EXTRA_UWB_PEER_ID) }
+            ?.getLongExtra(EXTRA_UWB_PEER_ID, -1L)
+            ?.takeIf { it != -1L }
 }
 
 @Composable
@@ -135,6 +156,7 @@ fun NoPermissionsScreen(
     hasBackground: Boolean,
     onPermissionsChanged: () -> Unit
 ) {
+    val context = LocalContext.current
     // The user granted location but only at an approximate (coarse) level.
     // FindFamily requires precise (fine) location.
     val coarseOnly = hasCoarse && !hasFine
@@ -206,7 +228,17 @@ fun NoPermissionsScreen(
 
             // STEP 2: Background Location
             Button(
-                onClick = { backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
+                onClick = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            }
+                        )
+                    } else {
+                        backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                    }
+                },
                 enabled = hasFine && !hasBackground
             ) {
                 val label = if (hasBackground) stringResource(R.string.permission_background_granted) else stringResource(R.string.permission_enable_all_the_time)
@@ -310,6 +342,7 @@ fun Navigation(
     ffViewModel: FindFamilyViewModel,
     showMissingFeatures: Boolean,
     deepLinkUwbPeerId: Long? = null,
+    onDeepLinkConsumed: () -> Unit = {},
 ) {
     val backStack = rememberNavBackStack<Route>(Route.MainPage())
 
@@ -322,6 +355,7 @@ fun Navigation(
     LaunchedEffect(deepLinkUwbPeerId) {
         if (deepLinkUwbPeerId != null) {
             backStack.add(Route.UwbRangingPage(deepLinkUwbPeerId))
+            onDeepLinkConsumed()
         }
     }
 

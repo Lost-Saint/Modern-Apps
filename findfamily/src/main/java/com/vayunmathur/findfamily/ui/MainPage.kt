@@ -47,7 +47,6 @@ import androidx.compose.material3.VerticalSlider
 import androidx.compose.material3.rememberSliderState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +64,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.findfamily.R
 import com.vayunmathur.findfamily.Route
 import com.vayunmathur.findfamily.data.LocationValue
@@ -91,10 +91,12 @@ import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
 import com.vayunmathur.library.util.formatSpeed
+import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.ExperimentalTime
 import kotlin.time.Clock
+import kotlin.time.Duration
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.LocalTime
@@ -106,6 +108,8 @@ import kotlinx.datetime.format.Padding
 import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.coroutines.launch
+import org.maplibre.compose.camera.CameraPosition
+import org.maplibre.compose.camera.CameraState
 import kotlin.time.Instant
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -123,37 +127,41 @@ fun MainPage(
         ffViewModel.applyInitialSelection(initialUserId, initialWaypointId)
     }
 
-    val selectedUserId by ffViewModel.selectedUserId.collectAsState()
-    val selectedWaypointId by ffViewModel.selectedWaypointId.collectAsState()
-    val isShowingPresent by ffViewModel.isShowingPresent.collectAsState()
-    val historicalPosition by ffViewModel.historicalPosition.collectAsState()
+    val selectedUserId by ffViewModel.selectedUserId.collectAsStateWithLifecycle()
+    val selectedWaypointId by ffViewModel.selectedWaypointId.collectAsStateWithLifecycle()
+    val isShowingPresent by ffViewModel.isShowingPresent.collectAsStateWithLifecycle()
+    val historicalPosition by ffViewModel.historicalPosition.collectAsStateWithLifecycle()
     var showSecurityCode by remember { mutableStateOf(false) }
 
-    val waypointName by ffViewModel.waypointName.collectAsState()
-    val waypointRange by ffViewModel.waypointRange.collectAsState()
-    val waypointCoord by ffViewModel.waypointCoord.collectAsState()
+    val waypointName by ffViewModel.waypointName.collectAsStateWithLifecycle()
+    val waypointRange by ffViewModel.waypointRange.collectAsStateWithLifecycle()
+    val waypointCoord by ffViewModel.waypointCoord.collectAsStateWithLifecycle()
 
     BackHandler(selectedUserId != null || (selectedWaypointId != null && selectedWaypointId != 0L)) {
         ffViewModel.clearSelection()
     }
 
-    val temporaryLinks by ffViewModel.temporaryLinks.collectAsState()
-    val waypoints by ffViewModel.waypoints.collectAsState()
+    val temporaryLinks by ffViewModel.temporaryLinks.collectAsStateWithLifecycle()
+    val waypoints by ffViewModel.waypoints.collectAsStateWithLifecycle()
+    val waypointsById by ffViewModel.waypointsById.collectAsStateWithLifecycle()
 
-    val connectedUsers by ffViewModel.connectedUsers.collectAsState()
-    val awaitingRequestUsers by ffViewModel.awaitingRequestUsers.collectAsState()
-    val usersByLocationName by ffViewModel.usersByLocationName.collectAsState()
-    val userPositions by ffViewModel.latestLocationByUser.collectAsState()
+    val users by ffViewModel.users.collectAsStateWithLifecycle()
+    val usersById by ffViewModel.usersById.collectAsStateWithLifecycle()
+    val connectedUsers by ffViewModel.connectedUsers.collectAsStateWithLifecycle()
+    val awaitingRequestUsers by ffViewModel.awaitingRequestUsers.collectAsStateWithLifecycle()
+    val usersByLocationName by ffViewModel.usersByLocationName.collectAsStateWithLifecycle()
+    val userPositions by ffViewModel.latestLocationByUser.collectAsStateWithLifecycle()
     val currentUserPosition = userPositions[Networking.userid]
     val coroutineScope = rememberCoroutineScope()
+    val camera = remember { CameraState(CameraPosition()) }
     val recenterTarget = when {
         selectedUserId != null -> if (isShowingPresent) {
-            userPositions[selectedUserId!!]?.coord?.toPosition()
+            userPositions[selectedUserId]?.coord?.toPosition()
         } else {
             historicalPosition
         }
         selectedWaypointId != null && selectedWaypointId != 0L -> {
-            waypoints.find { it.id == selectedWaypointId }?.coord?.toPosition()
+            waypointsById[selectedWaypointId]?.coord?.toPosition()
         }
         selectedWaypointId == 0L -> waypointCoord.toPosition()
         else -> currentUserPosition?.coord?.toPosition()
@@ -182,12 +190,12 @@ fun MainPage(
                         )
                     } else if (selectedUserId != null) {
                         if (selectedUserId != Networking.userid) {
-                            val user by ffViewModel.userByIdState(selectedUserId!!)
+                            val user = usersById[selectedUserId]
                             // UWB Find Nearby (UWB) requires the public android.ranging API
                             // (Android 15+). Hide the entry point on older devices.
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM) {
                                 IconButton({
-                                    backStack.add(Route.UwbRangingPage(selectedUserId!!))
+                                    selectedUserId?.let { backStack.add(Route.UwbRangingPage(it)) }
                                 }) {
                                     IconNavigationArrow()
                                 }
@@ -203,7 +211,7 @@ fun MainPage(
                             }
                         }
                     } else if (selectedWaypointId != null && selectedWaypointId != 0L) {
-                        val waypoint by ffViewModel.waypointByIdState(selectedWaypointId!!)
+                        val waypoint = waypointsById[selectedWaypointId]
                         IconButton({
                             waypoint?.let { ffViewModel.deleteWaypoint(it) }
                             ffViewModel.setSelectedWaypointId(null)
@@ -233,7 +241,7 @@ fun MainPage(
                     FloatingActionButtonMenuItem({
                         ffViewModel.beginCreateWaypoint()
                         currentUserPosition?.coord?.toPosition()?.let { coord ->
-                            coroutineScope.launch { animateMapTo(coord) }
+                            coroutineScope.launch { animateMapTo(camera, coord) }
                         }
                     },
                         { Text(stringResource(R.string.fab_location)) },
@@ -310,7 +318,7 @@ fun MainPage(
                         }
                     }
                 } else if (selectedUserId != null) {
-                    val selectedUser by ffViewModel.userByIdState(selectedUserId!!)
+                    val selectedUser = usersById[selectedUserId]
                     val requestPickContact = platform.requestPickContact { name, photo ->
                         selectedUser?.let { ffViewModel.upsertUser(it.copy(name = name, photo = photo)) }
                     }
@@ -375,7 +383,7 @@ fun MainPage(
                             {
                                 currentUserPosition?.coord?.let {
                                     ffViewModel.setWaypointCoord(it)
-                                    coroutineScope.launch { animateMapTo(it.toPosition()) }
+                                    coroutineScope.launch { animateMapTo(camera, it.toPosition()) }
                                 }
                             },
                             enabled = currentUserPosition != null
@@ -388,19 +396,23 @@ fun MainPage(
         }) { paddingValues ->
         Box(Modifier.padding(paddingValues).fillMaxWidth()) {
             val selectedUserObj = if (selectedUserId != null) {
-                val user by ffViewModel.userByIdState(selectedUserId!!)
+                val user = usersById[selectedUserId]
                 user?.let { SelectedUser(it, isShowingPresent, historicalPosition) }
             } else null
 
+            val onMoveWaypoint = remember(ffViewModel) {
+                { coord: com.vayunmathur.findfamily.data.Coord -> ffViewModel.setWaypointCoord(coord) }
+            }
             val selectedWaypointObj = if (selectedWaypointId != null) {
-                val waypoint by ffViewModel.waypointByIdState(selectedWaypointId!!) { Waypoint.NEW_WAYPOINT }
-                waypoint?.let { wp -> SelectedWaypoint(wp, waypointRange.toDoubleOrNull() ?: 0.0) {
-                    ffViewModel.setWaypointCoord(it)
-                } }
+                val waypoint = waypointsById[selectedWaypointId] ?: if (selectedWaypointId == 0L) Waypoint.NEW_WAYPOINT else null
+                waypoint?.let { wp -> SelectedWaypoint(wp, waypointRange.toDoubleOrNull() ?: 0.0) }
             } else null
 
             MapView(
-                ffViewModel,
+                camera = camera,
+                users = users,
+                waypoints = waypoints,
+                userPositions = userPositions,
                 onUserClick = {
                     ffViewModel.selectUser(it)
                 },
@@ -408,23 +420,24 @@ fun MainPage(
                     ffViewModel.clearSelection()
                 },
                 selectedUser = selectedUserObj,
-                selectedWaypoint = selectedWaypointObj
+                selectedWaypoint = selectedWaypointObj,
+                onMoveWaypoint = onMoveWaypoint
             )
 
-            if (selectedUserId != null) {
+            selectedUserId?.let { userId ->
                 HistoryBar(
                     backStack,
                     isShowingPresent,
                     { ffViewModel.setShowingPresent(it) },
                     ffViewModel,
-                    selectedUserId!!
+                    userId
                 ) { ffViewModel.setHistoricalPosition(it) }
             }
             val target = recenterTarget
             if (target != null) {
                 FloatingActionButton(
                     {
-                        coroutineScope.launch { animateMapTo(target) }
+                        coroutineScope.launch { animateMapTo(camera, target) }
                     },
                     Modifier.align(Alignment.TopEnd).padding(16.dp).size(48.dp)
                 ) {
@@ -435,35 +448,35 @@ fun MainPage(
     }
 
     // Map animation logic
-    LaunchedEffect(selectedUserId, isShowingPresent, historicalPosition) {
+    LaunchedEffect(selectedUserId, isShowingPresent, historicalPosition, userPositions) {
         if (selectedUserId != null) {
             val targetPosition = if (isShowingPresent) {
-                userPositions[selectedUserId!!]?.coord?.toPosition()
+                userPositions[selectedUserId]?.coord?.toPosition()
             } else {
                 historicalPosition
             }
             targetPosition?.let {
-                animateMapTo(it)
+                animateMapTo(camera, it)
             }
         }
     }
 
-    LaunchedEffect(selectedWaypointId) {
+    LaunchedEffect(selectedWaypointId, waypointsById) {
         if (selectedWaypointId != null && selectedWaypointId != 0L) {
-            val waypoint = waypoints.find { it.id == selectedWaypointId }
+            val waypoint = waypointsById[selectedWaypointId]
             waypoint?.coord?.toPosition()?.let {
-                animateMapTo(it)
+                animateMapTo(camera, it)
             }
         }
     }
 
     if (showSecurityCode && selectedUserId != null && selectedUserId != Networking.userid) {
-        val user by ffViewModel.userByIdState(selectedUserId!!)
+        val user = usersById[selectedUserId]
         user?.let { SecurityCodeDialog(it, ffViewModel) { showSecurityCode = false } }
     }
 }
 
-private suspend fun animateMapTo(position: org.maplibre.spatialk.geojson.Position) {
+private suspend fun animateMapTo(camera: CameraState, position: org.maplibre.spatialk.geojson.Position) {
     camera.animateTo(
         camera.position.copy(
             target = position,
@@ -486,7 +499,8 @@ fun BoxScope.HistoryBar(
         val colmod = if (isShowingPresent) Modifier else Modifier.fillMaxHeight(1f)
         Column(colmod.padding(4.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             if (!isShowingPresent) {
-                val now = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+                val nowInstant = rememberCurrentTime()
+                val now = nowInstant.toLocalDateTime(TimeZone.currentSystemDefault())
                 val currentDate = now.date
                 val currentTime = now.time
                 var pickedLocalDate by remember { mutableStateOf(currentDate) }
@@ -494,10 +508,20 @@ fun BoxScope.HistoryBar(
                     currentTime.toSecondOfDay().toFloat(), valueRange = 0.0f..(24f * 60f * 60f - 0.1f)
                 )
 
+                fun setSliderValue(value: Float) {
+                    val maximum = if (currentDate == pickedLocalDate) {
+                        currentTime.toSecondOfDay().toFloat()
+                    } else {
+                        24f * 60f * 60f - 0.1f
+                    }
+                    sliderState.value = value.coerceIn(0f, maximum)
+                }
+
                 sliderState.onValueChange = {
-                    val maximum = if (currentDate == pickedLocalDate) currentTime.toSecondOfDay().toFloat() else null
-                    if (maximum != null && it > maximum) sliderState.value = maximum
-                    else sliderState.value = it
+                    setSliderValue(it)
+                }
+                LaunchedEffect(pickedLocalDate, currentTime) {
+                    setSliderValue(sliderState.value)
                 }
                 val pickedLocalTime by remember {
                     derivedStateOf {
@@ -509,36 +533,36 @@ fun BoxScope.HistoryBar(
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     IconButton({
-                        sliderState.value -= 5 * 60
+                        setSliderValue(sliderState.value - 5 * 60)
                     }) {
                         Text(stringResource(R.string.history_rewind_large))
                     }
                     IconButton({
-                        sliderState.value += 5 * 60
+                        setSliderValue(sliderState.value + 5 * 60)
                     }) {
                         Text(stringResource(R.string.history_forward_large))
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     IconButton({
-                        sliderState.value -= 60
+                        setSliderValue(sliderState.value - 60)
                     }) {
                         Text(stringResource(R.string.history_rewind_medium))
                     }
                     IconButton({
-                        sliderState.value += 60
+                        setSliderValue(sliderState.value + 60)
                     }) {
                         Text(stringResource(R.string.history_forward_medium))
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     IconButton({
-                        sliderState.value -= 10
+                        setSliderValue(sliderState.value - 10)
                     }) {
                         Text(stringResource(R.string.history_rewind_small))
                     }
                     IconButton({
-                        sliderState.value += 10
+                        setSliderValue(sliderState.value + 10)
                     }) {
                         Text(stringResource(R.string.history_forward_small))
                     }
@@ -557,7 +581,7 @@ fun BoxScope.HistoryBar(
                 val simulatedTimestamp = pickedLocalDate.atTime(pickedLocalTime)
                     .toInstant(TimeZone.currentSystemDefault())
 
-                val locs by ffViewModel.locationHistory.collectAsState()
+                val locs by ffViewModel.locationHistory.collectAsStateWithLifecycle()
 
                 LaunchedEffect(simulatedTimestamp, locs) {
                     if (locs.isNotEmpty()) {
@@ -593,6 +617,7 @@ fun AwaitingRequestCard(backStack: NavBackStack<Route>, id: Long) {
 @Composable
 fun TemporaryLinkCard(platform: Platform, ffViewModel: FindFamilyViewModel, temporaryLink: TemporaryLink) {
     val context = LocalContext.current
+    rememberCurrentTime(1.minutes)
     val shareUrl = temporaryLink.shareUrl()
     val shareMessage = stringResource(R.string.share_temporary_link_message, shareUrl)
     Card {
@@ -646,10 +671,11 @@ fun WaypointCard(waypoint: Waypoint, userNamesHere: List<String>, onSelect: () -
 @Composable
 fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: Boolean, onClick: () -> Unit) {
     val context = LocalContext.current
+    val now = rememberCurrentTime()
     val lastUpdatedTime = locationValue?.let { timestring(it.timestamp, false, context) } ?: stringResource(R.string.last_updated_never)
     val speedString = (locationValue?.speed ?: 0f).formatSpeed()
     val sinceTime = user.lastLocationChangeTime.toLocalDateTime(TimeZone.currentSystemDefault())
-    val timeSinceEntry = Clock.System.now() - user.lastLocationChangeTime
+    val timeSinceEntry = now - user.lastLocationChangeTime
     val sinceString = when {
         user.locationName == "Unnamed Location" -> ""
         timeSinceEntry < 60.seconds -> stringResource(R.string.since_just_now)
@@ -662,7 +688,8 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
                 chars(" ")
                 amPmMarker("am", "pm")
             })
-            val formattedDate = when (sinceTime.date.toEpochDays() - Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date.toEpochDays()) {
+            val today = now.toLocalDateTime(TimeZone.currentSystemDefault()).date
+            val formattedDate = when (today.toEpochDays() - sinceTime.date.toEpochDays()) {
                 0L -> stringResource(R.string.today)
                 1L -> stringResource(R.string.yesterday)
                 else -> sinceTime.date.format(DateFormats.MONTH_DAY)
@@ -687,7 +714,7 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(user.name, fontWeight = FontWeight.Bold)
-                    LocationFreshnessChip(locationValue)
+                    LocationFreshnessChip(locationValue, now)
                 }
             },
             supportingContent = {
@@ -703,8 +730,8 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
 }
 
 @Composable
-fun LocationFreshnessChip(locationValue: LocationValue?) {
-    val age = locationValue?.let { Clock.System.now() - it.timestamp }
+fun LocationFreshnessChip(locationValue: LocationValue?, now: Instant = rememberCurrentTime()) {
+    val age = locationValue?.let { now - it.timestamp }
     val (label, color) = when {
         age == null -> stringResource(R.string.location_status_offline) to Color(0xFF6B7280)
         age <= 5.minutes -> stringResource(R.string.location_status_live) to Color(0xFF15803D)
@@ -749,6 +776,18 @@ fun timestring(timestamp: Instant, future: Boolean, context: Context): String {
         duration.inWholeHours < 24 -> context.getString(if (future) R.string.time_in_hours else R.string.time_hours_ago, duration.inWholeHours)
         else -> context.getString(if (future) R.string.time_in_days else R.string.time_days_ago, duration.inWholeDays)
     }
+}
+
+@Composable
+private fun rememberCurrentTime(period: Duration = 30.seconds): Instant {
+    var now by remember { mutableStateOf(Clock.System.now()) }
+    LaunchedEffect(period) {
+        while (true) {
+            delay(period)
+            now = Clock.System.now()
+        }
+    }
+    return now
 }
 
 private fun TemporaryLink.shareUrl(): String =

@@ -1,10 +1,12 @@
 package com.vayunmathur.findfamily.data
 
 import android.location.Location
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 import org.maplibre.spatialk.geojson.Position
 import kotlin.math.PI
 
+@Immutable
 @Serializable
 data class Coord(val lat: Double, val lon: Double)
 

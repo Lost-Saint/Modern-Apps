@@ -129,8 +129,21 @@ object UwbSessionManager {
             )
             return
         }
-        if (!initialized.get()) { Log.w(TAG, "startAsInitiator: NOT INITIALIZED — service hasn't called init() yet"); return }
-        if (_state.value !is UwbSessionState.Idle) { Log.i(TAG, "startAsInitiator: not idle, skipping"); return }
+        if (!initialized.get()) {
+            Log.w(TAG, "startAsInitiator: NOT INITIALIZED — service hasn't called init() yet")
+            _state.value = UwbSessionState.Failed("UWB service is not ready")
+            return
+        }
+        when (_state.value) {
+            UwbSessionState.Idle -> {}
+            is UwbSessionState.Failed,
+            is UwbSessionState.Unsupported,
+            UwbSessionState.PeerDisconnected -> stopLocal()
+            else -> {
+                Log.i(TAG, "startAsInitiator: not idle, skipping")
+                return
+            }
+        }
         _state.value = UwbSessionState.Starting
         val sessionId = UUID.randomUUID().toString()
         currentSessionId = sessionId
@@ -142,11 +155,12 @@ object UwbSessionManager {
             Log.i(TAG, "startAsInitiator: peerUser=${peerUser?.name} platform=${peerUser?.platform}")
             if (peerUser == null) {
                 _state.value = UwbSessionState.Failed("Unknown peer")
-                stopLocal()
+                stopLocal(resetState = false)
                 return@launch
             }
             if (peerUser.platform == "ios") {
-                beginCrossPlatformInitiateToIos(peerUserId, sessionId)
+                _state.value = UwbSessionState.Unsupported("Cross-platform UWB with iOS is not implemented yet")
+                stopLocal(resetState = false)
                 return@launch
             }
 
@@ -156,6 +170,7 @@ object UwbSessionManager {
             val info = ctrl.openController().getOrElse {
                 Log.e(TAG, "openController failed", it)
                 _state.value = UwbSessionState.Unsupported(it.message ?: "UWB not available on this device")
+                stopLocal(resetState = false)
                 return@launch
             }
             Log.i(TAG, "startAsInitiator: controller opened (addr=${info.localAddress.joinToString(":") { "%02x".format(it) }} ch=${info.channelNumber} pi=${info.preambleIndex}); publishing REQUEST")
@@ -177,7 +192,7 @@ object UwbSessionManager {
             Log.i(TAG, "startAsInitiator: publishUwbMessage returned $ok")
             if (!ok) {
                 _state.value = UwbSessionState.Failed("Could not reach peer")
-                stopLocal()
+                stopLocal(resetState = false)
                 return@launch
             }
             _state.value = UwbSessionState.WaitingForPeer
@@ -189,7 +204,7 @@ object UwbSessionManager {
                 }
                 if (ack == null) {
                     _state.value = UwbSessionState.Failed("Peer did not respond")
-                    stopLocal()
+                    stopLocal(resetState = false)
                     return@launch
                 }
                 if (ack.kind == UwbEnvelopeKind.CANCEL) {
@@ -200,7 +215,7 @@ object UwbSessionManager {
                 val peerAddress = ack.payload?.addressB64?.let(UwbBytes::from)
                 if (peerAddress == null) {
                     _state.value = UwbSessionState.Failed("Invalid peer ack")
-                    stopLocal()
+                    stopLocal(resetState = false)
                     return@launch
                 }
                 startRangingStream(
@@ -227,6 +242,7 @@ object UwbSessionManager {
         controller = ctrl
         val localAddress = ctrl.openControlee().getOrElse {
             _state.value = UwbSessionState.Unsupported(it.message ?: "UWB not available on this device")
+            stopLocal(resetState = false)
             return
         }
         val accessoryData = UwbAccessoryProtocol.encodeAccessoryConfigurationData(localAddress)
@@ -240,7 +256,7 @@ object UwbSessionManager {
         val ok = publish(envelope, peerUserId)
         if (!ok) {
             _state.value = UwbSessionState.Failed("Could not reach peer")
-            stopLocal()
+            stopLocal(resetState = false)
             return
         }
         _state.value = UwbSessionState.WaitingForPeer
@@ -250,16 +266,27 @@ object UwbSessionManager {
             }
             if (shareable == null) {
                 _state.value = UwbSessionState.Failed("iOS peer did not return ranging config")
-                stopLocal()
+                stopLocal(resetState = false)
                 return@launch
             }
             val parsed = try {
+                val shareableConfigData = shareable.payload?.shareableConfigDataB64
+                    ?: run {
+                        _state.value = UwbSessionState.Failed("Invalid iOS config")
+                        stopLocal(resetState = false)
+                        return@launch
+                    }
                 UwbAccessoryProtocol.parseShareableConfigurationData(
-                    UwbBytes.from(shareable.payload!!.shareableConfigDataB64!!)
+                    UwbBytes.from(shareableConfigData)
                 )
             } catch (e: Throwable) {
                 _state.value = UwbSessionState.Failed(e.message ?: "Could not parse iOS config")
-                stopLocal()
+                stopLocal(resetState = false)
+                return@launch
+            }
+            if (parsed == null) {
+                _state.value = UwbSessionState.Unsupported("Cross-platform UWB with iOS is not implemented yet")
+                stopLocal(resetState = false)
                 return@launch
             }
             startRangingStream(
@@ -288,22 +315,23 @@ object UwbSessionManager {
         scope.launch {
             // Cross-platform: iOS sender (no FiRa payload, only accessoryData).
             if (request.senderPlatform == "ios" || request.payload?.addressB64 == null) {
-                beginCrossPlatformAsAccessory(request)
+                _state.value = UwbSessionState.Unsupported("Cross-platform UWB with iOS is not implemented yet")
+                stopLocal(resetState = false)
                 return@launch
             }
             // After the early return above, payload + addressB64 are both non-null.
             val payload = request.payload
             val peerAddress = UwbBytes.from(payload.addressB64)
-            val sessionId = payload.sessionId ?: return@launch
-            val sessionKey = payload.sessionKeyB64?.let(UwbBytes::from) ?: return@launch
-            val channel = payload.channelNumber ?: return@launch
-            val preamble = payload.preambleIndex ?: return@launch
+            val sessionId = payload.sessionId ?: return@launch failIncoming("Invalid peer request")
+            val sessionKey = payload.sessionKeyB64?.let(UwbBytes::from) ?: return@launch failIncoming("Invalid peer request")
+            val channel = payload.channelNumber ?: return@launch failIncoming("Invalid peer request")
+            val preamble = payload.preambleIndex ?: return@launch failIncoming("Invalid peer request")
 
             val ctrl = UwbController(appContext)
             controller = ctrl
             val localAddress = ctrl.openControlee().getOrElse {
                 _state.value = UwbSessionState.Unsupported(it.message ?: "UWB not available on this device")
-                stopLocal()
+                stopLocal(resetState = false)
                 return@launch
             }
             val ack = UwbEnvelope(
@@ -316,7 +344,7 @@ object UwbSessionManager {
             val ok = publish(ack, request.sender.toLong())
             if (!ok) {
                 _state.value = UwbSessionState.Failed("Could not reach peer")
-                stopLocal()
+                stopLocal(resetState = false)
                 return@launch
             }
             startRangingStream(
@@ -337,7 +365,7 @@ object UwbSessionManager {
         controller = ctrl
         val localAddress = ctrl.openControlee().getOrElse {
             _state.value = UwbSessionState.Unsupported(it.message ?: "UWB not available on this device")
-            stopLocal()
+            stopLocal(resetState = false)
             return
         }
         val accessoryData = UwbAccessoryProtocol.encodeAccessoryConfigurationData(localAddress)
@@ -351,7 +379,7 @@ object UwbSessionManager {
         val ok = publish(configEnvelope, request.sender.toLong())
         if (!ok) {
             _state.value = UwbSessionState.Failed("Could not reach peer")
-            stopLocal()
+            stopLocal(resetState = false)
             return
         }
         _state.value = UwbSessionState.WaitingForPeer
@@ -360,17 +388,28 @@ object UwbSessionManager {
         }
         if (shareable == null) {
             _state.value = UwbSessionState.Failed("iOS peer did not return ranging config")
-            stopLocal()
+            stopLocal(resetState = false)
             return
         }
         val parsed = try {
+            val shareableConfigData = shareable.payload?.shareableConfigDataB64
+                ?: run {
+                    _state.value = UwbSessionState.Failed("Invalid iOS config")
+                    stopLocal(resetState = false)
+                    return
+                }
             UwbAccessoryProtocol.parseShareableConfigurationData(
-                UwbBytes.from(shareable.payload!!.shareableConfigDataB64!!)
+                UwbBytes.from(shareableConfigData)
             )
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to parse shareable config data", e)
             _state.value = UwbSessionState.Failed(e.message ?: "Could not parse iOS config")
-            stopLocal()
+            stopLocal(resetState = false)
+            return
+        }
+        if (parsed == null) {
+            _state.value = UwbSessionState.Unsupported("Cross-platform UWB with iOS is not implemented yet")
+            stopLocal(resetState = false)
             return
         }
         startRangingStream(
@@ -421,7 +460,7 @@ object UwbSessionManager {
             } catch (e: Exception) {
                 Log.e(TAG, "Exception in startRangingStream", e)
                 _state.value = UwbSessionState.Failed("Ranging stream failed: ${e.message}")
-                stopLocal()
+                stopLocal(resetState = false)
             }
         }
     }
@@ -469,13 +508,18 @@ object UwbSessionManager {
         }
     }
 
-    private fun stopLocal() {
+    private fun failIncoming(reason: String) {
+        _state.value = UwbSessionState.Failed(reason)
+        stopLocal(resetState = false)
+    }
+
+    private fun stopLocal(resetState: Boolean = true) {
         streamJob?.cancel(); streamJob = null
         waitJob?.cancel(); waitJob = null
         controller?.stop(); controller = null
         currentSessionId = null
         _peerUserId.value = null
-        _state.value = UwbSessionState.Idle
+        if (resetState) _state.value = UwbSessionState.Idle
     }
 
     private suspend fun waitForEnvelope(
@@ -483,6 +527,7 @@ object UwbSessionManager {
         timeoutMs: Long,
         predicate: (UwbEnvelope) -> Boolean,
     ): UwbEnvelope? = withTimeoutOrNull(timeoutMs) {
+        UwbInbox.consumePendingEnvelope(sessionId, predicate)?.let { return@withTimeoutOrNull it }
         UwbInbox.flow.first { it.sessionId == sessionId && predicate(it) }
     }
 }

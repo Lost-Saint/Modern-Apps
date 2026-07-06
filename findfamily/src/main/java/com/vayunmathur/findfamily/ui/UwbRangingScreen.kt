@@ -20,10 +20,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.findfamily.R
 import com.vayunmathur.findfamily.Route
 import com.vayunmathur.findfamily.uwb.RangingSample
@@ -61,9 +62,11 @@ fun UwbRangingScreen(
 ) {
     val context = LocalContext.current
 
-    val peer by ffViewModel.userByIdState(peerUserId)
-    val session by ffViewModel.uwbSession.collectAsState()
-    val activePeerId by ffViewModel.uwbPeerUserId.collectAsState()
+    val usersById by ffViewModel.usersById.collectAsStateWithLifecycle()
+    val peer = usersById[peerUserId]
+    val session by ffViewModel.uwbSession.collectAsStateWithLifecycle()
+    val activePeerId by ffViewModel.uwbPeerUserId.collectAsStateWithLifecycle()
+    val latestActivePeerId by rememberUpdatedState(activePeerId)
 
     // Runtime android.permission.RANGING gate (required by the public
     // android.ranging API on Android 15+). UWB_RANGING is the legacy perm
@@ -80,7 +83,7 @@ fun UwbRangingScreen(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasRangingPermission = granted }
 
-    LaunchedEffect(hasRangingPermission) {
+    LaunchedEffect(hasRangingPermission, peerUserId) {
         if (!hasRangingPermission) {
             permLauncher.launch("android.permission.RANGING")
             return@LaunchedEffect
@@ -102,10 +105,10 @@ fun UwbRangingScreen(
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(peerUserId) {
         onDispose {
             // Only end the session if it's the one this screen was watching.
-            if (activePeerId == peerUserId) {
+            if (latestActivePeerId == peerUserId) {
                 ffViewModel.stopRanging()
             }
         }

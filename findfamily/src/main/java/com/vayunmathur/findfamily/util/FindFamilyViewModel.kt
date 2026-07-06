@@ -6,12 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.LocationManager
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.State
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
@@ -112,6 +106,11 @@ class FindFamilyViewModel(
         .map { list -> list.associateBy { it.id } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
+    /** Waypoints keyed by id, so the UI can do id-based lookups without scanning. */
+    val waypointsById: StateFlow<Map<Long, Waypoint>> = waypointDao.getAllFlow()
+        .map { list -> list.associateBy { it.id } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
     private val _selfUserId = MutableStateFlow(Networking.userid)
     val selfUserId: StateFlow<Long> = _selfUserId.asStateFlow()
 
@@ -119,22 +118,6 @@ class FindFamilyViewModel(
     val usersByLocationName: StateFlow<Map<String, List<String>>> = userDao.getAllFlow()
         .map { list -> list.groupBy({ it.locationName }, { it.name }) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
-
-    // ------------------------------------------------------------------
-    // Composable single-item accessors
-    // ------------------------------------------------------------------
-
-    @Composable
-    fun userByIdState(id: Long, default: () -> User? = { null }): State<User?> {
-        val list by users.collectAsState()
-        return remember(id) { derivedStateOf { list.firstOrNull { it.id == id } ?: default() } }
-    }
-
-    @Composable
-    fun waypointByIdState(id: Long, default: () -> Waypoint? = { null }): State<Waypoint?> {
-        val list by waypoints.collectAsState()
-        return remember(id) { derivedStateOf { list.firstOrNull { it.id == id } ?: default() } }
-    }
 
     // ------------------------------------------------------------------
     // Mutation methods
@@ -256,7 +239,7 @@ class FindFamilyViewModel(
         val id = _selectedWaypointId.value ?: return
         val coord = _waypointCoord.value
         viewModelScope.launch(Dispatchers.IO) {
-            val base = if (id == 0L) Waypoint.NEW_WAYPOINT else waypointDao.get(id)
+            val base = if (id == 0L) Waypoint.NEW_WAYPOINT else waypointDao.get(id) ?: return@launch
             waypointDao.upsert(base.copy(name = name, range = range, coord = coord))
             withContext(Dispatchers.Main) {
                 _selectedWaypointId.value = null

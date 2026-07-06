@@ -27,15 +27,19 @@ object UwbInbox {
 
     /** Most-recent REQUEST envelope from each peer, keyed by sender userid (signed long). */
     private val pendingRequests = ConcurrentHashMap<Long, UwbEnvelope>()
+    private val pendingEnvelopeLock = Any()
+    private val pendingEnvelopes = ArrayDeque<UwbEnvelope>()
+
+    private const val MAX_PENDING_ENVELOPES = 64
 
     suspend fun emit(envelope: UwbEnvelope) {
-        cacheIfRequest(envelope)
+        cache(envelope)
         _flow.emit(envelope)
     }
 
     /** Non-suspending emit used from non-coroutine call sites. Returns false on overflow. */
     fun tryEmit(envelope: UwbEnvelope): Boolean {
-        cacheIfRequest(envelope)
+        cache(envelope)
         return _flow.tryEmit(envelope)
     }
 
@@ -43,12 +47,29 @@ object UwbInbox {
     fun consumePendingRequest(peerUserId: Long): UwbEnvelope? =
         pendingRequests.remove(peerUserId)
 
-    private fun cacheIfRequest(envelope: UwbEnvelope) {
+    fun consumePendingEnvelope(
+        sessionId: String,
+        predicate: (UwbEnvelope) -> Boolean,
+    ): UwbEnvelope? = synchronized(pendingEnvelopeLock) {
+        val index = pendingEnvelopes.indexOfFirst { it.sessionId == sessionId && predicate(it) }
+        if (index == -1) null else pendingEnvelopes.removeAt(index)
+    }
+
+    private fun cache(envelope: UwbEnvelope) {
         if (envelope.kind == UwbEnvelopeKind.REQUEST) {
             pendingRequests[envelope.sender.toLong()] = envelope
         } else if (envelope.kind == UwbEnvelopeKind.CANCEL) {
             // Cancel from peer invalidates any pending request from them.
             pendingRequests.remove(envelope.sender.toLong())
+        }
+        synchronized(pendingEnvelopeLock) {
+            if (envelope.kind == UwbEnvelopeKind.CANCEL) {
+                pendingEnvelopes.removeAll { it.sessionId == envelope.sessionId }
+            }
+            pendingEnvelopes.addLast(envelope)
+            while (pendingEnvelopes.size > MAX_PENDING_ENVELOPES) {
+                pendingEnvelopes.removeFirst()
+            }
         }
     }
 }

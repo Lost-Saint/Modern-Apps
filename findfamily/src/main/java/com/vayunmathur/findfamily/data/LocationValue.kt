@@ -5,10 +5,12 @@ import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.compose.runtime.Immutable
 import com.vayunmathur.library.util.DatabaseItem
 import kotlinx.serialization.Serializable
 import kotlin.time.Instant
 
+@Immutable
 @Serializable
 @Entity(indices = [Index(value = ["userid", "timestamp"])])
 data class LocationValue(
@@ -36,6 +38,7 @@ data class LocationValue(
     }
 }
 
+@Immutable
 @Serializable
 data class LocationValueCompatible(
     val id: ULong = 0uL,

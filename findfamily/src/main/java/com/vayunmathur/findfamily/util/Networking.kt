@@ -1,4 +1,5 @@
 package com.vayunmathur.findfamily.util
+import android.util.Log
 import com.vayunmathur.findfamily.data.LocationValue
 import com.vayunmathur.findfamily.data.LocationValueCompatible
 import com.vayunmathur.findfamily.data.TemporaryLink
@@ -48,8 +49,9 @@ object Networking {
         // Loads the persisted keypair (or generates+stores one on first launch) using the same
         // "publicKey"/"privateKey" datastore entries as before, so existing installs keep their key.
         identity = E2eeIdentity.loadOrCreate(DataStoreKeyStore(dataStoreUtils))
-        dataStoreUtils.setLong("userid", Random.nextLong(), true)
-        userid = dataStoreUtils.getLong("userid")!!
+        val generatedUserId = Random.nextLong()
+        dataStoreUtils.setLong("userid", generatedUserId, true)
+        userid = dataStoreUtils.getLong("userid") ?: generatedUserId
 
         if (userDao.getById(userid) == null) {
             userDao.upsert(
@@ -82,18 +84,12 @@ object Networking {
 
     private suspend inline fun <reified T, reified I> makeRequest(path: String, body: I): T? {
         return checkNetworkDown {
-            try {
-                NetworkClient.callJson<T>(
-                    url = "$URL$path",
-                    method = "POST",
-                    headers = mapOf("Content-Type" to "application/json"),
-                    body = body
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                null
-            }
+            NetworkClient.callJson<T>(
+                url = "$URL$path",
+                method = "POST",
+                headers = mapOf("Content-Type" to "application/json"),
+                body = body
+            )
         }
     }
 
@@ -207,6 +203,8 @@ object Networking {
             runCatching {
                 val plain = identity.decrypt(Base64.decode(b64)).decodeToString()
                 json.decodeFromString<UwbEnvelope>(plain)
+            }.onFailure {
+                Log.w("Networking", "Dropping malformed UWB envelope", it)
             }.getOrNull()
         }
     }

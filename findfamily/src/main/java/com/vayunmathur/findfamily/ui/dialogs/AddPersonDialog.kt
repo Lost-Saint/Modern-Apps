@@ -13,15 +13,17 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.findfamily.util.Networking
@@ -41,12 +43,12 @@ fun AddPersonDialog(
     platform: Platform,
     id: Long?,
 ) {
-    val usersByID by ffViewModel.usersById.collectAsState()
-    val myUserId by ffViewModel.selfUserId.collectAsState()
+    val usersByID by ffViewModel.usersById.collectAsStateWithLifecycle()
+    val myUserId by ffViewModel.selfUserId.collectAsStateWithLifecycle()
 
-    var userid: String by remember { mutableStateOf(id?.encodeBase26() ?: "") }
-    var contactName: String? by remember { mutableStateOf(null) }
-    var contactPhoto by remember { mutableStateOf<String?>(null) }
+    var userid: String by rememberSaveable(id) { mutableStateOf(id?.encodeBase26() ?: "") }
+    var contactName: String? by rememberSaveable { mutableStateOf(null) }
+    var contactPhoto by rememberSaveable { mutableStateOf<String?>(null) }
     val myId = myUserId.encodeBase26()
     val shareMyIdText = stringResource(R.string.share_my_id_message, myId)
     val requestPickContact2 = platform.requestPickContact { name, photo ->
@@ -54,7 +56,8 @@ fun AddPersonDialog(
         contactPhoto = photo
     }
 
-    val userStatus = usersByID[userid.decodeBase26()]?.requestStatus
+    val decodedUserId = userid.decodeBase26OrNull()
+    val userStatus = decodedUserId?.let { usersByID[it]?.requestStatus }
 
     Dialog({backStack.pop()}) {
         Card {
@@ -119,21 +122,23 @@ fun AddPersonDialog(
 
                 Button(
                     {
+                        val name = contactName ?: return@Button
+                        val idToAdd = decodedUserId ?: return@Button
                         val userToAdd = User(
-                            contactName!!,
+                            name,
                             contactPhoto,
                             "Unknown Location",
                             true,
                             if (userStatus == RequestStatus.AWAITING_REQUEST) RequestStatus.MUTUAL_CONNECTION else RequestStatus.AWAITING_RESPONSE,
                             Clock.System.now(),
                             null,
-                            userid.decodeBase26()
+                            idToAdd
                         )
                         ffViewModel.upsertUser(userToAdd) {
                             backStack.pop()
                         }
                     },
-                    enabled = userid.isNotBlank() && contactName != null && !(userStatus == RequestStatus.MUTUAL_CONNECTION || userStatus == RequestStatus.AWAITING_RESPONSE)
+                    enabled = decodedUserId != null && contactName != null && !(userStatus == RequestStatus.MUTUAL_CONNECTION || userStatus == RequestStatus.AWAITING_RESPONSE)
                 ) {
                     if (userStatus == RequestStatus.AWAITING_REQUEST) {
                         Text(stringResource(R.string.accept_location_request))
@@ -146,8 +151,10 @@ fun AddPersonDialog(
     }
 }
 
+private const val MAX_BASE26_LONG_LENGTH = 14
+
 private fun sanitizeFindFamilyId(value: String): String =
-    value.uppercase().filter { it in 'A'..'Z' }
+    value.uppercase().filter { it in 'A'..'Z' }.take(MAX_BASE26_LONG_LENGTH)
 
 private fun extractFindFamilyIdCandidate(value: String): String =
     Regex("[A-Za-z]+").findAll(value)
@@ -156,9 +163,16 @@ private fun extractFindFamilyIdCandidate(value: String): String =
         .lastOrNull()
         .orEmpty()
 
-fun String.decodeBase26(): Long = sanitizeFindFamilyId(this).fold(0uL) { acc, c ->
-    acc * 26uL + (c.code - 65).toULong()
-}.toLong()
+fun String.decodeBase26(): Long = decodeBase26OrNull() ?: 0L
+
+fun String.decodeBase26OrNull(): Long? {
+    val clean = sanitizeFindFamilyId(this)
+    if (clean.isBlank()) return null
+    val value = clean.fold(0uL) { acc, c ->
+        acc * 26uL + (c.code - 65).toULong()
+    }
+    return value.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
+}
 
 fun Long.encodeBase26(): String = buildString {
     var remaining = this@encodeBase26.toULong()
@@ -170,12 +184,13 @@ fun Long.encodeBase26(): String = buildString {
 
 @Composable
 fun interactionSourceClickable(onClick: () -> Unit): MutableInteractionSource {
+    val latestOnClick by rememberUpdatedState(onClick)
     return remember { MutableInteractionSource() }
         .also { interactionSource ->
             LaunchedEffect(interactionSource) {
                 interactionSource.interactions.collect {
                     if (it is PressInteraction.Release) {
-                        onClick()
+                        latestOnClick()
                     }
                 }
             }

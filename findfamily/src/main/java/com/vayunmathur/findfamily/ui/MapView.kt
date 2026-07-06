@@ -13,12 +13,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,15 +42,14 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.vayunmathur.findfamily.data.Coord
+import com.vayunmathur.findfamily.data.LocationValue
 import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.data.Waypoint
 import com.vayunmathur.findfamily.data.radians
 import com.vayunmathur.findfamily.data.toPosition
-import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.library.ui.invisibleClickable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.maplibre.compose.camera.CameraPosition
 import org.maplibre.compose.camera.CameraState
 import org.maplibre.compose.map.GestureOptions
 import org.maplibre.compose.map.MapOptions
@@ -62,32 +62,31 @@ import kotlin.io.encoding.Base64
 import kotlin.math.abs
 import kotlin.math.cos
 
-val camera = CameraState(CameraPosition())
-
+@Immutable
 data class SelectedUser(val user: User, val isShowingPresent: Boolean, val historicalPosition: Position?)
-data class SelectedWaypoint(val waypoint: Waypoint, val range: Double, val onMoveWaypoint: (Coord) -> Unit)
+@Immutable
+data class SelectedWaypoint(val waypoint: Waypoint, val range: Double)
 
 private fun Position.toCoord() = Coord(latitude, longitude)
 
 @Composable
 fun MapView(
-    viewModel: FindFamilyViewModel,
+    camera: CameraState,
+    users: List<User>,
+    waypoints: List<Waypoint>,
+    userPositions: Map<Long, LocationValue>,
     onUserClick: (Long) -> Unit,
     onMapClick: () -> Unit,
     selectedUser: SelectedUser? = null,
     selectedWaypoint: SelectedWaypoint? = null,
+    onMoveWaypoint: (Coord) -> Unit = {},
 ) {
-    val users by viewModel.users.collectAsState()
-    val waypoints by viewModel.waypoints.collectAsState()
-    val userPositions by viewModel.latestLocationByUser.collectAsState()
-
     var initialized by remember { mutableStateOf(false) }
+    val latestOnMoveWaypoint by rememberUpdatedState(onMoveWaypoint)
 
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            camera.awaitProjection()
-            initialized = true
-        }
+    LaunchedEffect(camera) {
+        withContext(Dispatchers.IO) { camera.awaitProjection() }
+        initialized = true
     }
 
     var sizeInDp by remember { mutableStateOf(DpOffset(0.dp, 0.dp)) }
@@ -135,12 +134,13 @@ fun MapView(
                 }
                 // Report the dragged position back to the parent outside of drawing.
                 if (selectedWaypoint != null && draggedCoord != null) {
-                    LaunchedEffect(draggedCoord) {
-                        selectedWaypoint.onMoveWaypoint(draggedCoord)
+                    LaunchedEffect(draggedCoord, selectedWaypoint.waypoint.id) {
+                        latestOnMoveWaypoint(draggedCoord)
                     }
                 }
                 key(camera.position, sizeInDp) {
                     Canvas(Modifier.fillMaxSize()) {
+                        val projection = camera.projection ?: return@Canvas
                         val allWaypoints =
                             if (selectedWaypoint?.waypoint?.id == 0L) (waypoints + selectedWaypoint.waypoint) else waypoints
                         for (waypoint in allWaypoints) {
@@ -149,13 +149,12 @@ fun MapView(
                             val coord = if (selectedWaypoint?.waypoint == waypoint) {
                                 draggedCoord ?: waypoint.coord
                             } else waypoint.coord
-                            val center =
-                                camera.projection!!.screenLocationFromPosition(coord.toPosition())
+                            val center = projection.screenLocationFromPosition(coord.toPosition())
                             if (center !in size.toDpSize()) continue
                             val circumferenceAtLatitude =
                                 40_075_000 * cos(radians(waypoint.coord.lat))
                             val radiusInDegrees = 360 * radiusMeters / circumferenceAtLatitude
-                            val edgePoint = camera.projection!!.screenLocationFromPosition(
+                            val edgePoint = projection.screenLocationFromPosition(
                                 Position(coord.lon + radiusInDegrees, coord.lat)
                             )
                             val radiusPx = abs((center.x - edgePoint.x).toPx())
@@ -171,8 +170,9 @@ fun MapView(
                 for (user in users) {
                     if (selectedUser != null && user.id != selectedUser.user.id) continue
                     val position = userPositions[user.id]?.coord?.toPosition() ?: continue
+                    val projection = camera.projection ?: continue
                     val center =
-                        camera.projection!!.screenLocationFromPosition(position) - DpOffset(
+                        projection.screenLocationFromPosition(position) - DpOffset(
                             35.dp,
                             35.dp
                         )
@@ -188,8 +188,9 @@ fun MapView(
                     }
                 }
                 if (selectedUser != null && !selectedUser.isShowingPresent && selectedUser.historicalPosition != null) {
+                    val projection = camera.projection ?: return@Box
                     val center =
-                        camera.projection!!.screenLocationFromPosition(selectedUser.historicalPosition) - DpOffset(
+                        projection.screenLocationFromPosition(selectedUser.historicalPosition) - DpOffset(
                             35.dp,
                             35.dp
                         )
@@ -218,7 +219,7 @@ private fun DpOffset.toOffset(density: Density): Offset = with(density) {
 
 @Composable
 fun UserPicture(user: User, size: Dp, grayscale: Boolean = false, onClick: () -> Unit = {}) {
-    UserPicture(user.photo, user.name.first(), size, grayscale, onClick)
+    UserPicture(user.photo, user.name.firstOrNull() ?: '?', size, grayscale, onClick)
 }
 
 @Composable
@@ -238,15 +239,18 @@ fun UserPicture(userPhoto: String?, firstChar: Char, size: Dp, grayscale: Boolea
     val context = androidx.compose.ui.platform.LocalContext.current
     val modifier = Modifier.clip(CircleShape).size(size).border(2.dp, MaterialTheme.colorScheme.primary, CircleShape).invisibleClickable(onClick)
     if(userPhoto != null) {
-        val userOutput: Any = if(userPhoto.startsWith("data")) {
+        val userOutput: Any = remember(userPhoto) { if(userPhoto.startsWith("data")) {
             val cleanString = userPhoto.substringAfter("base64,")
             Base64.UrlSafe.decode(cleanString)
-        } else userPhoto
-        AsyncImage(
+        } else userPhoto }
+        val request = remember(context, userOutput, userPhoto) {
             ImageRequest.Builder(context)
                 .data(userOutput)
                 .memoryCacheKey("user-photo-${userPhoto.hashCode()}")
-                .build(),
+                .build()
+        }
+        AsyncImage(
+            request,
             null,
             modifier,
             contentScale = ContentScale.FillWidth,

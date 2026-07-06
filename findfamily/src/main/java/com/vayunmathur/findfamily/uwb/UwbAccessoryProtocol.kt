@@ -11,10 +11,9 @@ package com.vayunmathur.findfamily.uwb
  *     (developer.apple.com/nearby-interaction → "Specification")
  *   - FiRa MAC Technical Requirements (TLV-encoded MAC params)
  *
- * The encode/parse functions below are stubbed: filling them in accurately
- * requires both specs in hand and is a multi-day task. The scaffolding
- * around them (transport, envelope routing, controlee session setup via
- * `android.ranging.RangingManager`) is complete.
+ * The encode function below is only a compatibility placeholder. Parsing
+ * iOS shareable configuration data is not currently supported, and the UI
+ * routing disables Android/iOS UWB sessions until that protocol is complete.
  */
 object UwbAccessoryProtocol {
 
@@ -33,12 +32,7 @@ object UwbAccessoryProtocol {
      * Parse the "shareableConfigurationData" blob received from iOS into the
      * concrete FiRa parameters this device should use as controlee.
      */
-    fun parseShareableConfigurationData(shareableConfigData: ByteArray): Parsed {
-        throw NotImplementedError(
-            "Apple accessory-protocol byte parsing not yet implemented. " +
-                "See UwbAccessoryProtocol.kt and Apple's UWB Third-Party Accessory spec."
-        )
-    }
+    fun parseShareableConfigurationData(shareableConfigData: ByteArray): Parsed? = null
 
     data class Parsed(
         val peerAddress: ByteArray,

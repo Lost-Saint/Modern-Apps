@@ -43,7 +43,7 @@ interface WaypointDao {
     suspend fun getAll(): List<Waypoint>
 
     @Query("SELECT * FROM Waypoint WHERE id = :id")
-    suspend fun get(id: Long): Waypoint
+    suspend fun get(id: Long): Waypoint?
 
     @Upsert
     suspend fun upsert(value: Waypoint): Long

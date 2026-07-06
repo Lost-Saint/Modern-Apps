@@ -16,11 +16,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.PermissionChecker
 import androidx.core.database.getBlobOrNull
 import androidx.core.database.getStringOrNull
 import com.vayunmathur.findfamily.R
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.io.encoding.Base64
 
 class Platform(private val context: Context) {
@@ -28,6 +31,7 @@ class Platform(private val context: Context) {
     @Composable
     fun requestPickContact(callback: (String, String?)->Unit): ()->Unit {
         val coroutine = rememberCoroutineScope()
+        val latestCallback = rememberUpdatedState(callback)
         if(Build.VERSION.SDK_INT >= 37) {
             // Launcher for the Contact Picker intent
             val pickContact = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -41,56 +45,55 @@ class Platform(private val context: Context) {
                     )
                     // Process the result URI in a background thread to fetch the single selected contact
                     coroutine.launch {
-                        val projection = arrayOf(
-                            ContactsContract.Contacts.LOOKUP_KEY,
-                            ContactsContract.Contacts.DISPLAY_NAME_PRIMARY,
-                            ContactsContract.Data.MIMETYPE, // Type of data (e.g., email or phone)
-                            ContactsContract.Contacts.Photo.PHOTO, // The actual data (Phone number / Email string)
-                        )
+                        val contact = withContext(Dispatchers.IO) {
+                            val projection = arrayOf(
+                                ContactsContract.Contacts.LOOKUP_KEY,
+                                ContactsContract.Contacts.DISPLAY_NAME_PRIMARY,
+                                ContactsContract.Data.MIMETYPE, // Type of data (e.g., email or phone)
+                                ContactsContract.Contacts.Photo.PHOTO, // The actual data (Phone number / Email string)
+                            )
 
-                        // We use `LOOKUP_KEY` as a unique ID to aggregate all contact info related to a same person
-                        val contactsMap = mutableMapOf<String, Contact>()
+                            // We use `LOOKUP_KEY` as a unique ID to aggregate all contact info related to a same person
+                            val contactsMap = mutableMapOf<String, Contact>()
 
-                        // Note: The Contact Picker Session Uri doesn't support custom selection & selectionArgs.
-                        // We query the URI directly to get the results chosen by the user.
-                        context.contentResolver.query(resultUri, projection, null, null, null)?.use { cursor ->
-                            // Get the column indices for our requested projection
-                            val lookupKeyIdx = cursor.getColumnIndex(ContactsContract.Contacts.LOOKUP_KEY)
-                            val mimeTypeIdx = cursor.getColumnIndex(ContactsContract.Data.MIMETYPE)
-                            val nameIdx = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
-                            val data1Idx = cursor.getColumnIndex(ContactsContract.Contacts.Photo.PHOTO)
+                            // Note: The Contact Picker Session Uri doesn't support custom selection & selectionArgs.
+                            // We query the URI directly to get the results chosen by the user.
+                            context.contentResolver.query(resultUri, projection, null, null, null)?.use { cursor ->
+                                // Get the column indices for our requested projection
+                                val lookupKeyIdx = cursor.getColumnIndex(ContactsContract.Contacts.LOOKUP_KEY)
+                                val mimeTypeIdx = cursor.getColumnIndex(ContactsContract.Data.MIMETYPE)
+                                val nameIdx = cursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
+                                val data1Idx = cursor.getColumnIndex(ContactsContract.Contacts.Photo.PHOTO)
 
-                            while (cursor.moveToNext()) {
-                                val lookupKey = cursor.getString(lookupKeyIdx)
-                                val mimeType = cursor.getString(mimeTypeIdx)
-                                val name = cursor.getString(nameIdx) ?: ""
-                                val data1 = cursor.getBlobOrNull(data1Idx)
+                                while (cursor.moveToNext()) {
+                                    val lookupKey = cursor.getString(lookupKeyIdx)
+                                    val mimeType = cursor.getString(mimeTypeIdx)
+                                    val name = cursor.getString(nameIdx) ?: ""
+                                    val data1 = cursor.getBlobOrNull(data1Idx)
 
-                                val photo = if (mimeType == ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE && data1 != null) {
-                                    val base64String = Base64.UrlSafe.encode(data1)
-                                    "data:image/jpeg;base64,$base64String"
-                                } else null
+                                    val photo = if (mimeType == ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE && data1 != null) {
+                                        val base64String = Base64.UrlSafe.encode(data1)
+                                        "data:image/jpeg;base64,$base64String"
+                                    } else null
 
-                                val existingContact = contactsMap[lookupKey]
-                                if (existingContact != null) {
-                                    contactsMap[lookupKey] = existingContact.copy(
-                                        photos = if (photo != null) existingContact.photos + photo else existingContact.photos
-                                    )
-                                } else {
-                                    contactsMap[lookupKey] = Contact(
-                                        lookupKey = lookupKey,
-                                        name = name,
-                                        photos = if (photo != null) listOf(photo) else emptyList(),
-                                    )
+                                    val existingContact = contactsMap[lookupKey]
+                                    if (existingContact != null) {
+                                        contactsMap[lookupKey] = existingContact.copy(
+                                            photos = if (photo != null) existingContact.photos + photo else existingContact.photos
+                                        )
+                                    } else {
+                                        contactsMap[lookupKey] = Contact(
+                                            lookupKey = lookupKey,
+                                            name = name,
+                                            photos = if (photo != null) listOf(photo) else emptyList(),
+                                        )
+                                    }
                                 }
                             }
-                        }
 
-                        // Invoke callback for each contact found
-                        contactsMap.values.firstOrNull()?.let { contact ->
-                            val photoUri = contact.photos.firstOrNull()
-                            callback(contact.name, photoUri)
+                            contactsMap.values.firstOrNull()
                         }
+                        contact?.let { latestCallback.value(it.name, it.photos.firstOrNull()) }
                     }
                 }
             }
@@ -117,18 +120,22 @@ class Platform(private val context: Context) {
             val launcher =
                 rememberLauncherForActivityResult(ActivityResultContracts.PickContact()) { uri ->
                     if (uri == null) return@rememberLauncherForActivityResult
-                    try {
-                        val cur = context.contentResolver.query(uri, null, null, null)!!
-                        if (cur.moveToFirst()) {
-                            val name =
-                                cur.getString(cur.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME))
-                            val photo =
-                                cur.getStringOrNull(cur.getColumnIndex(ContactsContract.Contacts.PHOTO_URI))
-                            callback(name, photo)
+                    coroutine.launch {
+                        try {
+                            val contact = withContext(Dispatchers.IO) {
+                                context.contentResolver.query(uri, null, null, null)?.use { cur ->
+                                    if (!cur.moveToFirst()) return@use null
+                                    val name =
+                                        cur.getString(cur.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)) ?: ""
+                                    val photo =
+                                        cur.getStringOrNull(cur.getColumnIndex(ContactsContract.Contacts.PHOTO_URI))
+                                    name to photo
+                                }
+                            }
+                            contact?.let { latestCallback.value(it.first, it.second) }
+                        } catch (e: Exception) {
+                            Log.e("Platform", "Error querying contact from picker URI: $uri", e)
                         }
-                        cur.close()
-                    } catch (e: Exception) {
-                        Log.e("Platform", "Error querying contact from picker URI: $uri", e)
                     }
                 }
             val permissionLauncher =

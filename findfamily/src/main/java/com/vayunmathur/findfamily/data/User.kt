@@ -2,11 +2,13 @@ package com.vayunmathur.findfamily.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import androidx.compose.runtime.Immutable
 import com.vayunmathur.library.util.DatabaseItem
 import kotlinx.serialization.Serializable
 import kotlin.time.Clock
 import kotlin.time.Instant
 
+@Immutable
 @Serializable
 enum class RequestStatus {
     MUTUAL_CONNECTION,
@@ -14,12 +16,13 @@ enum class RequestStatus {
     AWAITING_RESPONSE
 }
 
+@Immutable
 @Serializable
 @Entity
 data class User(
     val name: String,
     val photo: String?,
-    var locationName: String,
+    val locationName: String,
     val sendingEnabled: Boolean,
     val requestStatus: RequestStatus,
     val lastLocationChangeTime: Instant = Clock.System.now(),

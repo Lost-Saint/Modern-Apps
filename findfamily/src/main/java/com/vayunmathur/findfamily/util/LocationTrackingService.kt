@@ -24,6 +24,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
@@ -349,14 +350,20 @@ class LocationTrackingService : Service(), SensorEventListener {
             heartbeatJob?.cancel()
             heartbeatJob = launch {
                 while (isActive) {
-                    // "Only this time" grants are revoked once the app leaves the
-                    // foreground; detect that here and shut down gracefully rather
-                    // than spinning (or crashing) on location access we can't make.
-                    if (!LocationServiceController.hasFineLocationPermission(this@LocationTrackingService)) {
-                        withContext(Dispatchers.Main) { stopSelf() }
-                        break
+                    try {
+                        // "Only this time" grants are revoked once the app leaves the
+                        // foreground; detect that here and shut down gracefully rather
+                        // than spinning (or crashing) on location access we can't make.
+                        if (!LocationServiceController.hasFineLocationPermission(this@LocationTrackingService)) {
+                            withContext(Dispatchers.Main) { stopSelf() }
+                            break
+                        }
+                        syncHeartbeat()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e("LocationTrackingService", "Location heartbeat failed", e)
                     }
-                    syncHeartbeat()
                     delay(30.seconds)
                 }
             }
@@ -370,7 +377,13 @@ class LocationTrackingService : Service(), SensorEventListener {
             uwbPollJob?.cancel()
             uwbPollJob = launch {
                 while (isActive) {
-                    drainUwbInbox()
+                    try {
+                        drainUwbInbox()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e("LocationTrackingService", "UWB inbox drain failed", e)
+                    }
                     delay(3.seconds)
                 }
             }
@@ -580,8 +593,8 @@ class LocationTrackingService : Service(), SensorEventListener {
 }
 
 suspend fun Context.fetchAddress(lat: Double, lng: Double): Address? =
-    suspendCancellableCoroutine { continuation ->
-        val geocoder = Geocoder(this, Locale.getDefault())
+    withTimeoutOrNull(5.seconds) { suspendCancellableCoroutine { continuation ->
+        val geocoder = Geocoder(this@fetchAddress, Locale.getDefault())
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // Modern Async API (Android 13+)
@@ -589,8 +602,10 @@ suspend fun Context.fetchAddress(lat: Double, lng: Double): Address? =
                 val result = addresses.firstOrNull()
 
                 // Use the stable 3-parameter lambda
-                continuation.resume(result) { _, _, _ ->
-                    /* No specific cleanup needed for Address objects */
+                if (continuation.isActive) {
+                    continuation.resume(result) { _, _, _ ->
+                        /* No specific cleanup needed for Address objects */
+                    }
                 }
             }
         } else {
@@ -598,9 +613,9 @@ suspend fun Context.fetchAddress(lat: Double, lng: Double): Address? =
             try {
                 @Suppress("DEPRECATION")
                 val address = geocoder.getFromLocation(lat, lng, 1)?.firstOrNull()
-                continuation.resume(address)
+                if (continuation.isActive) continuation.resume(address)
             } catch (_: Exception) {
-                continuation.resume(null)
+                if (continuation.isActive) continuation.resume(null)
             }
         }
 
@@ -609,7 +624,7 @@ suspend fun Context.fetchAddress(lat: Double, lng: Double): Address? =
             // Geocoder doesn't support manual cancellation,
             // but this prevents memory leaks in the listener.
         }
-    }
+    } }
 
 class ServiceRestartWorker(
     appContext: Context,
