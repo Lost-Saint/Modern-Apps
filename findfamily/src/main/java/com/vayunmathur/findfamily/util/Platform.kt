@@ -2,6 +2,7 @@ package com.vayunmathur.findfamily.util
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -151,8 +152,29 @@ class Platform(private val context: Context) {
     }
 
     fun copy(content: String) {
-        val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clipData = android.content.ClipData.newPlainText(context.getString(R.string.clipboard_label), content)
         clipboardManager.setPrimaryClip(clipData)
+    }
+
+    fun readClipboardText(): String? {
+        val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        return clipboardManager.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    fun shareText(content: String) {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, content)
+        }
+        val chooser = Intent.createChooser(sendIntent, null).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(chooser)
     }
 }

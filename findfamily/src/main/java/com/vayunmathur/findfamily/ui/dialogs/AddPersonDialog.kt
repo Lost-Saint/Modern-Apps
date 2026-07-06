@@ -3,10 +3,12 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,6 +31,7 @@ import com.vayunmathur.findfamily.R
 import com.vayunmathur.findfamily.data.RequestStatus
 import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.library.ui.IconCopy
+import com.vayunmathur.library.ui.IconShare
 import kotlin.time.Clock
 
 @Composable
@@ -43,6 +46,8 @@ fun AddPersonDialog(
     var userid: String by remember { mutableStateOf(id?.encodeBase26() ?: "") }
     var contactName: String? by remember { mutableStateOf(null) }
     var contactPhoto by remember { mutableStateOf<String?>(null) }
+    val myId = Networking.userid.encodeBase26()
+    val shareMyIdText = stringResource(R.string.share_my_id_message, myId)
     val requestPickContact2 = platform.requestPickContact { name, photo ->
         contactName = name
         contactPhoto = photo
@@ -56,10 +61,10 @@ fun AddPersonDialog(
                 Text(stringResource(R.string.add_person_title), style = MaterialTheme.typography.headlineMedium)
 
                 OutlinedTextField(
-                    Networking.userid.encodeBase26(),
+                    myId,
                     {},
                     interactionSource = interactionSourceClickable {
-                        platform.copy(Networking.userid.encodeBase26())
+                        platform.copy(myId)
                     },
                     label = { Text(stringResource(R.string.your_findfamily_id)) },
                     trailingIcon = {
@@ -68,9 +73,19 @@ fun AddPersonDialog(
                     readOnly = true
                 )
 
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton({ platform.copy(myId) }) {
+                        Text(stringResource(R.string.copy_id))
+                    }
+                    OutlinedButton({ platform.shareText(shareMyIdText) }) {
+                        IconShare()
+                        Text(stringResource(R.string.share_my_id))
+                    }
+                }
+
                 OutlinedTextField(
                     userid,
-                    { userid = it },
+                    { userid = sanitizeFindFamilyId(it) },
                     readOnly = id != null,
                     label = { Text(stringResource(R.string.contact_findfamily_id)) },
                     isError = userStatus == RequestStatus.MUTUAL_CONNECTION || userStatus == RequestStatus.AWAITING_RESPONSE,
@@ -86,6 +101,16 @@ fun AddPersonDialog(
                             else -> null
                         }
                     )
+
+                if (id == null) {
+                    OutlinedButton({
+                        platform.readClipboardText()?.let { pasted ->
+                            userid = extractFindFamilyIdCandidate(pasted)
+                        }
+                    }) {
+                        Text(stringResource(R.string.paste_from_clipboard))
+                    }
+                }
 
                 OutlinedTextField(contactName ?: "", {}, interactionSource = interactionSourceClickable {
                     requestPickContact2()
@@ -120,7 +145,17 @@ fun AddPersonDialog(
     }
 }
 
-fun String.decodeBase26(): Long = fold(0uL) { acc, c ->
+private fun sanitizeFindFamilyId(value: String): String =
+    value.uppercase().filter { it in 'A'..'Z' }
+
+private fun extractFindFamilyIdCandidate(value: String): String =
+    Regex("[A-Za-z]+").findAll(value)
+        .map { it.value.uppercase() }
+        .toList()
+        .lastOrNull()
+        .orEmpty()
+
+fun String.decodeBase26(): Long = sanitizeFindFamilyId(this).fold(0uL) { acc, c ->
     acc * 26uL + (c.code - 65).toULong()
 }.toLong()
 

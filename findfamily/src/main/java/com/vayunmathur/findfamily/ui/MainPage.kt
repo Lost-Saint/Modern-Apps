@@ -52,6 +52,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,6 +85,7 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconNavigationArrow
+import com.vayunmathur.library.ui.IconShare
 import com.vayunmathur.library.ui.IconVerify
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.util.NavBackStack
@@ -103,6 +105,7 @@ import kotlinx.datetime.format.MonthNames
 import kotlinx.datetime.format.Padding
 import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
+import kotlinx.coroutines.launch
 import kotlin.time.Instant
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -128,6 +131,7 @@ fun MainPage(
 
     val waypointName by ffViewModel.waypointName.collectAsState()
     val waypointRange by ffViewModel.waypointRange.collectAsState()
+    val waypointCoord by ffViewModel.waypointCoord.collectAsState()
 
     BackHandler(selectedUserId != null || (selectedWaypointId != null && selectedWaypointId != 0L)) {
         ffViewModel.clearSelection()
@@ -140,6 +144,20 @@ fun MainPage(
     val awaitingRequestUsers by ffViewModel.awaitingRequestUsers.collectAsState()
     val usersByLocationName by ffViewModel.usersByLocationName.collectAsState()
     val userPositions by ffViewModel.latestLocationByUser.collectAsState()
+    val currentUserPosition = userPositions[Networking.userid]
+    val coroutineScope = rememberCoroutineScope()
+    val recenterTarget = when {
+        selectedUserId != null -> if (isShowingPresent) {
+            userPositions[selectedUserId!!]?.coord?.toPosition()
+        } else {
+            historicalPosition
+        }
+        selectedWaypointId != null && selectedWaypointId != 0L -> {
+            waypoints.find { it.id == selectedWaypointId }?.coord?.toPosition()
+        }
+        selectedWaypointId == 0L -> waypointCoord.toPosition()
+        else -> currentUserPosition?.coord?.toPosition()
+    }
 
     Scaffold(
         topBar = {
@@ -214,6 +232,9 @@ fun MainPage(
                         { Icon(painterResource(R.drawable.outline_person_24), null) })
                     FloatingActionButtonMenuItem({
                         ffViewModel.beginCreateWaypoint()
+                        currentUserPosition?.coord?.toPosition()?.let { coord ->
+                            coroutineScope.launch { animateMapTo(coord) }
+                        }
                     },
                         { Text(stringResource(R.string.fab_location)) },
                         { Icon(painterResource(R.drawable.outline_pin_drop_24), null) })
@@ -349,6 +370,18 @@ fun MainPage(
                                 { Text(stringResource(R.string.waypoint_range_error)) }
                             } else null
                         )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            {
+                                currentUserPosition?.coord?.let {
+                                    ffViewModel.setWaypointCoord(it)
+                                    coroutineScope.launch { animateMapTo(it.toPosition()) }
+                                }
+                            },
+                            enabled = currentUserPosition != null
+                        ) {
+                            Text(stringResource(R.string.use_current_location))
+                        }
                     }
                 }
             }
@@ -387,6 +420,17 @@ fun MainPage(
                     selectedUserId!!
                 ) { ffViewModel.setHistoricalPosition(it) }
             }
+            val target = recenterTarget
+            if (target != null) {
+                FloatingActionButton(
+                    {
+                        coroutineScope.launch { animateMapTo(target) }
+                    },
+                    Modifier.align(Alignment.TopEnd).padding(16.dp).size(48.dp)
+                ) {
+                    IconNavigationArrow()
+                }
+            }
         }
     }
 
@@ -399,12 +443,7 @@ fun MainPage(
                 historicalPosition
             }
             targetPosition?.let {
-                camera.animateTo(
-                    camera.position.copy(
-                        target = it,
-                        zoom = 15.0
-                    )
-                )
+                animateMapTo(it)
             }
         }
     }
@@ -413,12 +452,7 @@ fun MainPage(
         if (selectedWaypointId != null && selectedWaypointId != 0L) {
             val waypoint = waypoints.find { it.id == selectedWaypointId }
             waypoint?.coord?.toPosition()?.let {
-                camera.animateTo(
-                    camera.position.copy(
-                        target = it,
-                        zoom = 15.0
-                    )
-                )
+                animateMapTo(it)
             }
         }
     }
@@ -427,6 +461,15 @@ fun MainPage(
         val user by ffViewModel.userByIdState(selectedUserId!!)
         user?.let { SecurityCodeDialog(it, ffViewModel) { showSecurityCode = false } }
     }
+}
+
+private suspend fun animateMapTo(position: org.maplibre.spatialk.geojson.Position) {
+    camera.animateTo(
+        camera.position.copy(
+            target = position,
+            zoom = 15.0
+        )
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -550,6 +593,8 @@ fun AwaitingRequestCard(backStack: NavBackStack<Route>, id: Long) {
 @Composable
 fun TemporaryLinkCard(platform: Platform, ffViewModel: FindFamilyViewModel, temporaryLink: TemporaryLink) {
     val context = LocalContext.current
+    val shareUrl = temporaryLink.shareUrl()
+    val shareMessage = stringResource(R.string.share_temporary_link_message, shareUrl)
     Card {
         ListItem({
             Text(temporaryLink.name)
@@ -558,9 +603,15 @@ fun TemporaryLinkCard(platform: Platform, ffViewModel: FindFamilyViewModel, temp
         }, trailingContent = {
             Row {
                 IconButton({
-                    platform.copy("https://findfamily.cc/view/${temporaryLink.id}#key=${temporaryLink.key}")
+                    platform.copy(shareUrl)
                 }) {
                     IconCopy()
+                }
+                Spacer(Modifier.width(16.dp))
+                IconButton({
+                    platform.shareText(shareMessage)
+                }) {
+                    IconShare()
                 }
                 Spacer(Modifier.width(16.dp))
                 IconButton({
@@ -630,7 +681,15 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
                     }
                 }
             },
-            headlineContent = { Text(user.name, fontWeight = FontWeight.Bold) },
+            headlineContent = {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(user.name, fontWeight = FontWeight.Bold)
+                    LocationFreshnessChip(locationValue)
+                }
+            },
             supportingContent = {
                 if (showSupportingContent) {
                     Text(stringResource(R.string.user_card_status, lastUpdatedTime, user.locationName, sinceString))
@@ -640,6 +699,29 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
                     Text(speedString)
                 }
             })
+    }
+}
+
+@Composable
+fun LocationFreshnessChip(locationValue: LocationValue?) {
+    val age = locationValue?.let { Clock.System.now() - it.timestamp }
+    val (label, color) = when {
+        age == null -> stringResource(R.string.location_status_offline) to Color(0xFF6B7280)
+        age <= 5.minutes -> stringResource(R.string.location_status_live) to Color(0xFF15803D)
+        age <= 30.minutes -> stringResource(R.string.location_status_stale) to Color(0xFFD97706)
+        else -> stringResource(R.string.location_status_offline) to Color(0xFF6B7280)
+    }
+    Surface(
+        color = color.copy(alpha = 0.16f),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Text(
+            label,
+            Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+            color = color,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        )
     }
 }
 
@@ -668,6 +750,9 @@ fun timestring(timestamp: Instant, future: Boolean, context: Context): String {
         else -> context.getString(if (future) R.string.time_in_days else R.string.time_days_ago, duration.inWholeDays)
     }
 }
+
+private fun TemporaryLink.shareUrl(): String =
+    "https://findfamily.cc/view/$id#key=$key"
 
 object DateFormats {
     // example: Jun 4

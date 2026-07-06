@@ -110,6 +110,10 @@
     <string name="contact_name_label">Contact\'s Name</string>
     <string name="accept_location_request">Accept Location Request</string>
     <string name="request_location">Request Location</string>
+    <string name="copy_id">Copy ID</string>
+    <string name="share_my_id">Share my ID</string>
+    <string name="share_my_id_message">My FindFamily ID: %1$s</string>
+    <string name="paste_from_clipboard">Paste from clipboard</string>
 
     <!-- Platform -->
     <string name="clipboard_label">text</string>
@@ -123,6 +127,13 @@
 
     <!-- Settings -->
     <string name="settings">Settings</string>
+
+    <!-- Map and sharing -->
+    <string name="use_current_location">Use current location</string>
+    <string name="share_temporary_link_message">Open my FindFamily link: %1$s</string>
+    <string name="location_status_live">Live</string>
+    <string name="location_status_stale">Stale</string>
+    <string name="location_status_offline">Offline</string>
 
     <!-- UWB Find Nearby -->
     <string name="notification_channel_uwb_request_name">Find Nearby (UWB) Requests</string>
