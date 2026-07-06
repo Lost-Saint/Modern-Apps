@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.ParcelUuid
 import android.util.Log
+import com.vayunmathur.watch.shared.ble.BleConstants
 import com.vayunmathur.watch.phone.data.WatchBatch
 import com.vayunmathur.watch.phone.data.WatchRecord
 import java.io.ByteArrayOutputStream
@@ -47,6 +48,7 @@ class GattClientManager(private val context: Context) {
 
     private var gatt: BluetoothGatt? = null
     private var scanning = false
+    private var dndCharacteristic: BluetoothGattCharacteristic? = null
 
     private val reassembly = ByteArrayOutputStream()
 
@@ -55,6 +57,10 @@ class GattClientManager(private val context: Context) {
 
     private val _batches = MutableSharedFlow<List<WatchRecord>>(extraBufferCapacity = 8)
     val batches: SharedFlow<List<WatchRecord>> = _batches
+
+    // Interruption-filter bytes pushed by the watch over the DND characteristic.
+    private val _remoteDnd = MutableSharedFlow<Int>(extraBufferCapacity = 8)
+    val remoteDnd: SharedFlow<Int> = _remoteDnd
 
     fun startScan() {
         val scanner = bluetoothManager.adapter?.bluetoothLeScanner ?: return
@@ -122,7 +128,10 @@ class GattClientManager(private val context: Context) {
             if (status != BluetoothGatt.GATT_SUCCESS) return
             val service = gatt.getService(BleConstants.SERVICE_UUID) ?: return
             val dataChar = service.getCharacteristic(BleConstants.DATA_CHARACTERISTIC_UUID) ?: return
+            dndCharacteristic = service.getCharacteristic(BleConstants.DND_CHARACTERISTIC_UUID)
             _state.value = ConnectionState.Connected
+            // Enable the Data CCCD first; the DND CCCD is enabled from
+            // onDescriptorWrite so the two descriptor writes are sequenced.
             subscribe(gatt, dataChar)
         }
 
@@ -131,8 +140,14 @@ class GattClientManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int,
         ) {
-            // Subscription active; the watch will now push the batch.
-            reassembly.reset()
+            when (descriptor.characteristic?.uuid) {
+                BleConstants.DATA_CHARACTERISTIC_UUID -> {
+                    // Subscription active; the watch will now push the batch.
+                    reassembly.reset()
+                    // Then subscribe to DND (one GATT op at a time).
+                    dndCharacteristic?.let { subscribe(gatt, it) }
+                }
+            }
         }
 
         override fun onCharacteristicChanged(
@@ -140,11 +155,17 @@ class GattClientManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            if (characteristic.uuid != BleConstants.DATA_CHARACTERISTIC_UUID) return
-            if (value.contentEquals(BleConstants.EOT_MARKER)) {
-                finishBatch(gatt)
-            } else {
-                reassembly.write(value)
+            when (characteristic.uuid) {
+                BleConstants.DATA_CHARACTERISTIC_UUID -> {
+                    if (value.contentEquals(BleConstants.EOT_MARKER)) {
+                        finishBatch(gatt)
+                    } else {
+                        reassembly.write(value)
+                    }
+                }
+                BleConstants.DND_CHARACTERISTIC_UUID -> {
+                    if (value.isNotEmpty()) _remoteDnd.tryEmit(value[0].toInt())
+                }
             }
         }
     }
@@ -153,6 +174,18 @@ class GattClientManager(private val context: Context) {
         gatt.setCharacteristicNotification(characteristic, true)
         val cccd = characteristic.getDescriptor(BleConstants.CCCD_UUID) ?: return
         gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+    }
+
+    /** Writes a new interruption filter to the watch's DND characteristic. */
+    fun writeDnd(filter: Int) {
+        val g = gatt ?: return
+        val service = g.getService(BleConstants.SERVICE_UUID) ?: return
+        val dnd = service.getCharacteristic(BleConstants.DND_CHARACTERISTIC_UUID) ?: return
+        g.writeCharacteristic(
+            dnd,
+            byteArrayOf(filter.toByte()),
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+        )
     }
 
     private fun finishBatch(gatt: BluetoothGatt) {

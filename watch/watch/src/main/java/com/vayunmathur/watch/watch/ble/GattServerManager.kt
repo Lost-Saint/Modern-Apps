@@ -15,6 +15,7 @@ import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.os.ParcelUuid
 import android.util.Log
+import com.vayunmathur.watch.shared.ble.BleConstants
 import com.vayunmathur.watch.watch.data.SensorDao
 import com.vayunmathur.watch.watch.data.SensorRecord
 import kotlinx.coroutines.CoroutineScope
@@ -33,6 +34,8 @@ private data class WireRecord(
     val timestamp: Long,
     val value: Double,
     val delta: Double,
+    val stationary: Boolean = false,
+    val session: String? = null,
 )
 
 @Serializable
@@ -50,6 +53,9 @@ class GattServerManager(
     private val context: Context,
     private val dao: SensorDao,
     private val scope: CoroutineScope,
+    // Invoked when the phone writes a new interruption filter to the DND
+    // characteristic. The caller (DndController) applies it locally, loop-guarded.
+    private val onRemoteDnd: (Int) -> Unit = {},
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -61,12 +67,20 @@ class GattServerManager(
 
     private lateinit var dataCharacteristic: BluetoothGattCharacteristic
     private lateinit var controlCharacteristic: BluetoothGattCharacteristic
+    private lateinit var dndCharacteristic: BluetoothGattCharacteristic
 
     // Per-device negotiated MTU (default 23 until MTU exchange).
     private val deviceMtu = mutableMapOf<String, Int>()
 
     // Ids streamed to each device in the last batch, pending ACK.
     private val pendingAck = mutableMapOf<String, List<Long>>()
+
+    // Devices subscribed to DND notifications, keyed by address.
+    private val dndSubscribers = mutableMapOf<String, BluetoothDevice>()
+
+    // Authoritative interruption-filter byte the watch holds and serves. Defaults
+    // to ALL (1 = no Do-Not-Disturb) until the local DndController pushes reality.
+    @Volatile private var currentDnd: Int = 1
 
     private val _advertising = MutableStateFlow(false)
     val advertising: StateFlow<Boolean> = _advertising
@@ -119,8 +133,23 @@ class GattServerManager(
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
 
+        dndCharacteristic = BluetoothGattCharacteristic(
+            BleConstants.DND_CHARACTERISTIC_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ or
+                BluetoothGattCharacteristic.PROPERTY_WRITE or
+                BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE,
+        )
+        dndCharacteristic.addDescriptor(
+            BluetoothGattDescriptor(
+                BleConstants.CCCD_UUID,
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
+            ),
+        )
+
         service.addCharacteristic(dataCharacteristic)
         service.addCharacteristic(controlCharacteristic)
+        service.addCharacteristic(dndCharacteristic)
         server.addService(service)
     }
 
@@ -154,6 +183,14 @@ class GattServerManager(
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
+        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
+                dndSubscribers.remove(device.address)
+                deviceMtu.remove(device.address)
+                pendingAck.remove(device.address)
+            }
+        }
+
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             deviceMtu[device.address] = mtu
         }
@@ -170,11 +207,18 @@ class GattServerManager(
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, 0 /* GATT_SUCCESS */, offset, value)
             }
-            // Subscription enabled -> stream the current batch.
-            if (descriptor.uuid == BleConstants.CCCD_UUID && value != null &&
+            val enabling = descriptor.uuid == BleConstants.CCCD_UUID && value != null &&
                 value.isNotEmpty() && value[0].toInt() != 0
-            ) {
-                streamBatch(device)
+            if (!enabling) return
+            // Both the Data and DND characteristics carry a 0x2902 CCCD, so branch
+            // on the owning characteristic.
+            when (descriptor.characteristic?.uuid) {
+                BleConstants.DATA_CHARACTERISTIC_UUID -> streamBatch(device)
+                BleConstants.DND_CHARACTERISTIC_UUID -> {
+                    dndSubscribers[device.address] = device
+                    // Push the current value so the client syncs its initial state.
+                    notify(device, dndCharacteristic, byteArrayOf(currentDnd.toByte()))
+                }
             }
         }
 
@@ -184,10 +228,15 @@ class GattServerManager(
             offset: Int,
             characteristic: BluetoothGattCharacteristic,
         ) {
-            // A plain read triggers a fresh stream and returns an empty ack payload.
-            gattServer?.sendResponse(device, requestId, 0, offset, ByteArray(0))
-            if (characteristic.uuid == BleConstants.DATA_CHARACTERISTIC_UUID) {
-                streamBatch(device)
+            when (characteristic.uuid) {
+                BleConstants.DATA_CHARACTERISTIC_UUID -> {
+                    // A plain read triggers a fresh stream and returns an empty ack payload.
+                    gattServer?.sendResponse(device, requestId, 0, offset, ByteArray(0))
+                    streamBatch(device)
+                }
+                BleConstants.DND_CHARACTERISTIC_UUID ->
+                    gattServer?.sendResponse(device, requestId, 0, offset, byteArrayOf(currentDnd.toByte()))
+                else -> gattServer?.sendResponse(device, requestId, 0, offset, ByteArray(0))
             }
         }
 
@@ -200,10 +249,14 @@ class GattServerManager(
             offset: Int,
             value: ByteArray?,
         ) {
-            if (characteristic.uuid == BleConstants.CONTROL_CHARACTERISTIC_UUID &&
-                value != null && value.isNotEmpty()
-            ) {
-                handleControl(device, value)
+            if (value != null && value.isNotEmpty()) {
+                when (characteristic.uuid) {
+                    BleConstants.CONTROL_CHARACTERISTIC_UUID -> handleControl(device, value)
+                    BleConstants.DND_CHARACTERISTIC_UUID -> {
+                        currentDnd = value[0].toInt()
+                        onRemoteDnd(currentDnd)
+                    }
+                }
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, 0, offset, null)
@@ -229,7 +282,7 @@ class GattServerManager(
         scope.launch(Dispatchers.IO) {
             val rows: List<SensorRecord> = dao.getAll()
             val batch = WireBatch(rows.map {
-                WireRecord(it.id, it.type.name, it.timestamp, it.value, it.delta)
+                WireRecord(it.id, it.type.name, it.timestamp, it.value, it.delta, it.stationary, it.session)
             })
             pendingAck[device.address] = rows.map { it.id }
 
@@ -240,20 +293,34 @@ class GattServerManager(
             var offset = 0
             while (offset < payload.size) {
                 val end = minOf(offset + chunkSize, payload.size)
-                notify(device, payload.copyOfRange(offset, end))
+                notify(device, dataCharacteristic, payload.copyOfRange(offset, end))
                 offset = end
             }
             // Zero-length batches still send EOT so the client can complete.
-            notify(device, BleConstants.EOT_MARKER)
+            notify(device, dataCharacteristic, BleConstants.EOT_MARKER)
         }
     }
 
+    /**
+     * Updates the held interruption filter and notifies every subscribed device.
+     * Called by the local DndController when the watch's own DnD state changes.
+     */
+    fun pushLocalDnd(filter: Int) {
+        currentDnd = filter
+        val bytes = byteArrayOf(filter.toByte())
+        dndSubscribers.values.toList().forEach { notify(it, dndCharacteristic, bytes) }
+    }
+
     @Suppress("DEPRECATION")
-    private fun notify(device: BluetoothDevice, bytes: ByteArray) {
+    private fun notify(
+        device: BluetoothDevice,
+        characteristic: BluetoothGattCharacteristic,
+        bytes: ByteArray,
+    ) {
         val server = gattServer ?: return
         try {
-            dataCharacteristic.value = bytes
-            server.notifyCharacteristicChanged(device, dataCharacteristic, false)
+            characteristic.value = bytes
+            server.notifyCharacteristicChanged(device, characteristic, false)
         } catch (e: Exception) {
             Log.e(TAG, "notify failed", e)
         }

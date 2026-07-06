@@ -10,7 +10,11 @@ import android.os.IBinder
 import com.vayunmathur.watch.phone.R
 import com.vayunmathur.watch.phone.ble.ConnectionState
 import com.vayunmathur.watch.phone.ble.GattClientManager
+import com.vayunmathur.watch.phone.data.ReceivedDatabase
+import com.vayunmathur.watch.phone.data.ReceivedRecord
+import com.vayunmathur.watch.phone.data.WatchRecord
 import com.vayunmathur.watch.phone.health.HealthConnectManager
+import com.vayunmathur.watch.phone.health.HealthDerivations
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,11 +34,17 @@ class SyncForegroundService : Service() {
 
     private lateinit var client: GattClientManager
     private lateinit var health: HealthConnectManager
+    private lateinit var buffer: ReceivedDatabase
+    private lateinit var dndController: DndController
+    private val derivations = HealthDerivations()
 
     override fun onCreate() {
         super.onCreate()
         client = GattClientManager(this)
         health = HealthConnectManager(this)
+        buffer = ReceivedDatabase.get(this)
+        dndController = DndController(this, client)
+        dndController.register(scope)
 
         scope.launch {
             client.state.collect { state ->
@@ -48,10 +58,38 @@ class SyncForegroundService : Service() {
 
         scope.launch {
             client.batches.collect { records ->
-                health.insert(records)
+                processBatch(records)
                 syncedCount.value += records.size
             }
         }
+    }
+
+    private suspend fun processBatch(records: List<WatchRecord>) {
+        // 1. Write raw HR/Steps and the direct daily totals to Health Connect.
+        health.insert(records)
+
+        // 2. Persist the batch into the rolling phone-side buffer.
+        buffer.receivedDao().insertAll(
+            records.map {
+                ReceivedRecord(
+                    key = "${it.type}-${it.id}",
+                    type = it.type,
+                    timestamp = it.timestamp,
+                    value = it.value,
+                    delta = it.delta,
+                    stationary = it.stationary,
+                )
+            },
+        )
+
+        // 3. Run resting-HR + sleep derivations over the buffered window.
+        val cutoff = System.currentTimeMillis() - BUFFER_WINDOW_MS
+        val buffered = buffer.receivedDao().getInRange(cutoff, Long.MAX_VALUE)
+        val derived = derivations.derive(buffered)
+        health.insertDerived(derived)
+
+        // 4. Prune buffer rows outside the rolling window.
+        buffer.receivedDao().deleteOlderThan(cutoff)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,6 +116,7 @@ class SyncForegroundService : Service() {
 
     override fun onDestroy() {
         client.disconnect()
+        dndController.unregister()
         scope.cancel()
         connectionState.value = ConnectionState.Disconnected
         super.onDestroy()
@@ -88,6 +127,8 @@ class SyncForegroundService : Service() {
     companion object {
         private const val CHANNEL_ID = "watch_sync"
         private const val NOTIFICATION_ID = 1
+        // Rolling buffer window (~3 days) used for daily/overnight derivations.
+        private const val BUFFER_WINDOW_MS = 3L * 24 * 60 * 60 * 1000
 
         val connectionState = MutableStateFlow(ConnectionState.Disconnected)
         val syncedCount = MutableStateFlow(0)

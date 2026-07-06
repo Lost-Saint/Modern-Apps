@@ -6,8 +6,8 @@
     android:viewportWidth="200"
     android:viewportHeight="200">
     <path
-        android:strokeColor="@android:color/system_accent1_100"
-        android:strokeWidth="16"
+        android:strokeColor="@color/clock_widget_hour"
+        android:strokeWidth="12"
         android:strokeLineCap="round"
-        android:pathData="M100,114 L100,64" />
+        android:pathData="M100,100 L100,64" />
 </vector>

@@ -15,6 +15,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
@@ -178,6 +183,7 @@ fun ContinuousParagraphEditor(
     onBackspace: (gPos: Int) -> Int? = { null },
     onToggleCheckbox: ((globalParaIndex: Int) -> Unit)? = null,
     onFocusChangedCb: (Boolean) -> Unit = {},
+    onDeletePrevBlock: () -> Unit = {},
     remoteCarets: List<RemoteCaret> = emptyList(),
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
@@ -245,7 +251,15 @@ fun ContinuousParagraphEditor(
             visualTransformation = transformation,
             onTextLayout = { layout = it },
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-            modifier = Modifier.fillMaxWidth().onFocusChanged { onFocusChangedCb(it.isFocused) }
+            modifier = Modifier.fillMaxWidth()
+                .onPreviewKeyEvent { ev ->
+                    // Backspace at the very start of this run deletes the object (image, page break,
+                    // table of contents, chart…) sitting just above it.
+                    if (ev.type == KeyEventType.KeyDown && ev.key == Key.Backspace &&
+                        tfv.selection.collapsed && tfv.selection.start == 0 && start > 0
+                    ) { onDeletePrevBlock(); true } else false
+                }
+                .onFocusChanged { onFocusChangedCb(it.isFocused) }
         )
         // Tappable overlays over each checkbox glyph so tapping toggles its checked state.
         val lay = layout
@@ -298,7 +312,8 @@ fun ContinuousParagraphEditor(
 
 private fun sameLayout(a: OdfParagraph, b: OdfParagraph): Boolean =
     a.alignment == b.alignment && a.lineHeightPercent == b.lineHeightPercent &&
-        a.textIndent == 0f && b.textIndent == 0f
+        a.textIndent == 0f && b.textIndent == 0f &&
+        a.marginLeft == b.marginLeft && a.listLevel == b.listLevel
 
 /**
  * Transformed-text start offset (start of the injected prefix) for each paragraph. Every paragraph
@@ -406,7 +421,11 @@ private fun buildDocTransformed(
             // overrides the alignment/indent of real content. (A5/A6 + paragraph-spacing fix)
             if (groupEnds) {
                 val styleSrc = (groupFirst..i).firstOrNull { lens[it] > 0 }?.let { paras[it] } ?: paras[groupFirst]
-                val firstLineIndent = if (styleSrc.textIndent != 0f) styleSrc.textIndent.sp else 0.sp
+                // Left indent for the whole paragraph = paragraph margin + nested-list level; applied to
+                // every line via TextIndent.restLine, with the first line getting the extra first-line indent.
+                val leftIndent = styleSrc.marginLeft + maxOf(0, styleSrc.listLevel - 1) * 16f
+                val firstLineIndent = (leftIndent + styleSrc.textIndent).sp
+                val restIndent = leftIndent.sp
                 // Justify is stretched at draw time, but BasicTextField computes caret / selection /
                 // handle positions from the UNSTRETCHED glyph advances, so they drift left of the
                 // displayed justified glyphs. Render the editable field with Start alignment so the
@@ -418,7 +437,7 @@ private fun buildDocTransformed(
                     androidx.compose.ui.text.ParagraphStyle(
                         textAlign = editorAlign,
                         lineHeight = styleSrc.lineHeightPercent?.let { (22f * mult * it).sp } ?: TextUnit.Unspecified,
-                        textIndent = if (styleSrc.textIndent != 0f) androidx.compose.ui.text.style.TextIndent(firstLine = firstLineIndent, restLine = 0.sp) else androidx.compose.ui.text.style.TextIndent.None
+                        textIndent = if (leftIndent != 0f || styleSrc.textIndent != 0f) androidx.compose.ui.text.style.TextIndent(firstLine = firstLineIndent, restLine = restIndent) else androidx.compose.ui.text.style.TextIndent.None
                     ),
                     groupStart, length
                 )

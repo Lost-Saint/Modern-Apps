@@ -1,10 +1,12 @@
 package com.vayunmathur.watch.phone
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -35,8 +37,13 @@ import com.vayunmathur.watch.phone.sync.SyncForegroundService
 
 class MainActivity : ComponentActivity() {
 
+    // Notification-policy (DnD) access is granted via a Settings screen, so re-read
+    // it on resume to hide the prompt as soon as the user returns from Settings.
+    private var dndAccessGranted by mutableStateOf(true)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        dndAccessGranted = notificationPolicyGranted()
         setContent {
             MaterialTheme {
                 Scaffold { padding ->
@@ -45,6 +52,14 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        dndAccessGranted = notificationPolicyGranted()
+    }
+
+    private fun notificationPolicyGranted(): Boolean =
+        getSystemService(NotificationManager::class.java).isNotificationPolicyAccessGranted
 
     @Composable
     private fun SyncScreen(modifier: Modifier) {
@@ -103,6 +118,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+
+            // Policy access can't be granted via the runtime permission dialog, so
+            // deep-link into the dedicated Settings screen when it is missing. The
+            // flag is refreshed in onResume, so this hides on return from Settings.
+            if (!dndAccessGranted) {
+                Button(onClick = { openDndAccessSettings() }) {
+                    Text(stringResource(R.string.grant_dnd_access))
+                }
+            }
         }
     }
 
@@ -120,6 +144,14 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.ACCESS_FINE_LOCATION,
         Manifest.permission.POST_NOTIFICATIONS,
     )
+
+    private fun openDndAccessSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+        } catch (e: Exception) {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+        }
+    }
 
     private fun openHealthConnectInstall() {
         val uri = Uri.parse("market://details?id=com.google.android.apps.healthdata")

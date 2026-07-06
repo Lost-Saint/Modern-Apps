@@ -2,8 +2,9 @@ package com.vayunmathur.office.util
 
 import android.content.Context
 import com.vayunmathur.e2ee.E2ee
-import com.vayunmathur.e2ee.E2eeIdentity
 import com.vayunmathur.e2ee.E2eeKeyStore
+import com.vayunmathur.e2ee.Pqc
+import com.vayunmathur.e2ee.PqcIdentity
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.util.DataStoreUtils
 import io.ktor.client.HttpClient
@@ -44,7 +45,7 @@ object OfficeSync {
     private const val URL = "https://findfamily.cc/office"
     private val json = Json { ignoreUnknownKeys = true }
 
-    private lateinit var identity: E2eeIdentity
+    private lateinit var identity: PqcIdentity
     var deviceId: String = ""
         private set
     private var initialized = false
@@ -62,7 +63,7 @@ object OfficeSync {
         initMutex.withLock {
             if (initialized) return
             val ds = DataStoreUtils.getInstance(context)
-            identity = E2eeIdentity.loadOrCreate(DataStoreKeyStore(ds), "officePublicKey", "officePrivateKey")
+            identity = PqcIdentity.loadOrCreate(DataStoreKeyStore(ds), "office")
             var id = ds.getString("officeDeviceId")
             if (id == null) {
                 id = UUID.randomUUID().toString()
@@ -75,9 +76,9 @@ object OfficeSync {
     }
 
     private suspend fun register(): Boolean =
-        post("/register", RegisterReq(deviceId, Base64.encode(identity.publicKeyPem)))
+        post("/register", RegisterReq(deviceId, Base64.encode(identity.publicBundle)))
 
-    /** Fetches a peer's public key (PEM bytes) by id from the directory. */
+    /** Fetches a peer's public key bundle by id from the directory. */
     suspend fun getKey(id: String): ByteArray? {
         val r = raw("/getkey", IdReq(id)) ?: return null
         return if (r.status == 200) Base64.decode(r.body) else null
@@ -109,10 +110,10 @@ object OfficeSync {
     // --- Inbox channel (invites encrypted to the recipient's public key) ---
 
     /** Shares a document by dropping an encrypted invite into the recipient's inbox channel. */
-    suspend fun sendInvite(recipientId: String, docId: String, key: ByteArray, title: String, charMode: Boolean, role: String, ownerKeyB64: String): Boolean {
-        val peerPem = getKey(recipientId) ?: return false
-        val invite = json.encodeToString(Invite(docId, Base64.encode(key), title, charMode, role, ownerKeyB64))
-        val blob = Base64.encode(E2ee.sealTo(peerPem, invite.encodeToByteArray()))
+    suspend fun sendInvite(recipientId: String, docId: String, key: ByteArray, title: String, charMode: Boolean, role: String, ownerKeyB64: String, charKind: String): Boolean {
+        val peerBundle = getKey(recipientId) ?: return false
+        val invite = json.encodeToString(Invite(docId, Base64.encode(key), title, charMode, role, ownerKeyB64, charKind))
+        val blob = Base64.encode(Pqc.encryptTo(peerBundle, invite.encodeToByteArray()))
         return append("inbox:$recipientId", listOf(blob)) != null
     }
 
@@ -120,25 +121,37 @@ object OfficeSync {
     suspend fun pullInvites(since: Int): InvitesResult {
         val p = pull("inbox:$deviceId", since) ?: return InvitesResult(emptyList(), since)
         val invites = p.actions.mapNotNull { b ->
-            val plain = runCatching { identity.unseal(Base64.decode(b)) }.getOrNull() ?: return@mapNotNull null
+            val plain = runCatching { identity.decrypt(Base64.decode(b)) }.getOrNull() ?: return@mapNotNull null
             runCatching { json.decodeFromString<Invite>(plain.decodeToString()) }.getOrNull()
         }
         return InvitesResult(invites, p.seq)
     }
 
-    /** Verification security code with a peer, given their PEM public key (compare out-of-band). */
-    suspend fun securityCode(peerPublicKeyPem: ByteArray): String? =
-        runCatching { E2ee.securityCode(identity.publicKeyPem, peerPublicKeyPem) }.getOrNull()
+    /** Verification security code with a peer, given their public key bundle (compare out-of-band). */
+    suspend fun securityCode(peerBundle: ByteArray): String? =
+        runCatching { Pqc.securityCode(identity.publicBundle, peerBundle) }.getOrNull()
 
-    /** This device's public key (PEM), e.g. to record as a document owner. */
-    val publicKeyPem: ByteArray get() = identity.publicKeyPem
+    /** This device's public key bundle (ML-KEM + ML-DSA), e.g. to record as a document owner. */
+    val publicBundle: ByteArray get() = identity.publicBundle
 
-    /** Signs [data] with this device's identity key (authenticates op/roster authorship). */
+    /** Signs [data] with this device's ML-DSA key (authenticates op/roster authorship). */
     suspend fun sign(data: ByteArray): ByteArray = identity.sign(data)
 
-    /** Verifies a signature against a public key (PEM). */
-    suspend fun verify(publicKeyPem: ByteArray, data: ByteArray, signature: ByteArray): Boolean =
-        E2ee.verify(publicKeyPem, data, signature)
+    /** Verifies a signature against a public key bundle. */
+    suspend fun verify(publicBundle: ByteArray, data: ByteArray, signature: ByteArray): Boolean =
+        Pqc.verify(publicBundle, data, signature)
+
+    /** Seals [data] to a recipient's public bundle (hybrid PQC) — e.g. a rotated document key. */
+    suspend fun seal(bundle: ByteArray, data: ByteArray): ByteArray = Pqc.encryptTo(bundle, data)
+
+    /** Unseals data that was sealed to this device. */
+    suspend fun unseal(data: ByteArray): ByteArray = identity.decrypt(data)
+
+    /** Appends opaque (already-encoded) blobs to a channel (no extra encryption). */
+    suspend fun appendRaw(channel: String, items: List<String>): Int? = append(channel, items)
+
+    /** Pulls opaque blobs from a channel (no decryption). */
+    suspend fun pullRaw(channel: String, since: Int): List<String> = pull(channel, since)?.actions ?: emptyList()
 
     // --- Live sync + presence over WebSocket (receive live; send presence) ---
 
@@ -192,6 +205,20 @@ object OfficeSync {
     suspend fun sendPresence(channel: String, key: ByteArray, plaintext: String) {
         val data = Base64.encode(E2ee.aesEncrypt(key, plaintext.encodeToByteArray()))
         runCatching { wsSession?.send(Frame.Text(json.encodeToString(PresenceMsg("presence", channel, data)))) }
+    }
+
+    /**
+     * Pushes encrypted action blobs over the WebSocket (same live path as presence) so peers get them
+     * instantly. The server both stores and fans them out. Returns false if the socket isn't connected
+     * (caller should fall back to [appendDocActions] over HTTP).
+     */
+    suspend fun liveAppend(channel: String, key: ByteArray, items: List<String>): Boolean {
+        val session = wsSession ?: return false
+        val blobs = items.map { Base64.encode(E2ee.aesEncrypt(key, it.encodeToByteArray())) }
+        return runCatching {
+            session.send(Frame.Text(json.encodeToString(AppendMsg("append", channel, blobs))))
+            true
+        }.getOrDefault(false)
     }
 
     /** Parses a raw live message. */
@@ -252,6 +279,7 @@ object OfficeSync {
         val charMode: Boolean = false,
         val role: String = "editor",
         val ownerKey: String = "",
+        val charKind: String = "",
     )
 
     class InvitesResult(val invites: List<Invite>, val seq: Int)
@@ -259,6 +287,7 @@ object OfficeSync {
 
     @Serializable private data class SubMsg(val t: String, val channel: String)
     @Serializable private data class PresenceMsg(val t: String, val channel: String, val data: String)
+    @Serializable private data class AppendMsg(val t: String, val channel: String, val actions: List<String>)
 
     /** A live server message: `t` = "actions" (with [actions]+[seq]) or "presence" (with [data]). */
     @Serializable data class LiveMsg(

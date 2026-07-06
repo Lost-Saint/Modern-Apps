@@ -9,6 +9,12 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import com.vayunmathur.library.util.BottomBarItem
+import com.vayunmathur.library.util.BottomNavBar
+import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.NavKey
+import com.vayunmathur.library.util.rememberNavBackStack
+import kotlinx.serialization.Serializable
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -94,6 +100,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.Typography
 import com.vayunmathur.office.odf.*
 import com.vayunmathur.library.ui.odf.*
@@ -103,9 +110,27 @@ import kotlinx.coroutines.launch
 
 @Composable
 private fun OfficeLightTheme(content: @Composable () -> Unit) {
-    // Office only supports light mode; always use a light color scheme regardless of the system theme.
+    // Light scheme — used only for the rendered document (the "paper"), which stays light in dark mode.
     val colorScheme = dynamicLightColorScheme(LocalContext.current)
     MaterialTheme(colorScheme = colorScheme, typography = Typography(), content = content)
+}
+
+@Composable
+private fun OfficeAppTheme(content: @Composable () -> Unit) {
+    // The app chrome (menus, toolbars, home) is dark; the document content re-wraps in the light theme.
+    val colorScheme = dynamicDarkColorScheme(LocalContext.current)
+    MaterialTheme(colorScheme = colorScheme, typography = Typography(), content = content)
+}
+
+/** Top-level navigation routes for the Office app (shared nav framework). */
+@Serializable
+sealed interface OfficeRoute : NavKey {
+    @Serializable data object Offline : OfficeRoute
+    @Serializable data object Online : OfficeRoute
+    /** Editing a local/offline document (optionally identified by its source uri). */
+    @Serializable data class OfflineEditor(val uri: String? = null) : OfficeRoute
+    /** Editing a cloud-synced document, identified by its document id. */
+    @Serializable data class OnlineEditor(val docId: String) : OfficeRoute
 }
 
 class MainActivity : ComponentActivity() {
@@ -122,6 +147,11 @@ class MainActivity : ComponentActivity() {
             val startedWithIntent = intentUri != null
             var documentUri by rememberSaveable { mutableStateOf(intentUri) }
             val state by viewModel.state.collectAsState()
+            val backStack = rememberNavBackStack<OfficeRoute>(
+                if (intentUri != null) OfficeRoute.OfflineEditor(intentUri.toString()) else OfficeRoute.Offline
+            )
+
+            LaunchedEffect(Unit) { viewModel.initSync() }
 
             if (documentUri != null && state is OfficeViewModel.ViewState.Empty) {
                 viewModel.loadDocument(documentUri!!, documentUri?.lastPathSegment ?: "document")
@@ -145,84 +175,103 @@ class MainActivity : ComponentActivity() {
             )
 
             val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                uri?.let { documentUri = it; viewModel.loadDocument(it, it.lastPathSegment ?: "document") }
+                uri?.let {
+                    documentUri = it
+                    viewModel.loadDocument(it, it.lastPathSegment ?: "document")
+                    backStack.add(OfficeRoute.OfflineEditor(it.toString()))
+                }
             }
 
-            OfficeLightTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            val pages: List<BottomBarItem<out OfficeRoute>> = listOf(
+                BottomBarItem("Offline", OfficeRoute.Offline, com.vayunmathur.library.R.drawable.home_24px),
+                BottomBarItem("Online", OfficeRoute.Online, com.vayunmathur.library.R.drawable.outline_file_download_24)
+            )
+
+            fun leaveEditor() {
+                if (startedWithIntent) finish()
+                else {
+                    documentUri = null
+                    viewModel.clear()
+                    if (backStack.backStack.size > 1) backStack.pop()
+                }
+            }
+
+            OfficeAppTheme {
+                val editorContent: @Composable () -> Unit = {
                     when (val s = state) {
-                        is OfficeViewModel.ViewState.Empty -> HomeScreen(
-                            viewModel = viewModel,
-                            onOpenDocument = { filePickerLauncher.launch(odfMimeTypes) }
-                        )
-                        is OfficeViewModel.ViewState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                         is OfficeViewModel.ViewState.Loaded -> DocumentScreen(
                             document = s.document, viewModel = viewModel, activity = this@MainActivity,
-                            onBack = { if (startedWithIntent) finish() else { documentUri = null; viewModel.clear() } }
+                            onBack = { leaveEditor() },
+                            // When an offline doc is shared it becomes a cloud doc — switch its route.
+                            onBecameOnline = { id -> backStack.setLast(OfficeRoute.OnlineEditor(id)) }
                         )
                         is OfficeViewModel.ViewState.Error -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(stringResource(R.string.error_loading), style = MaterialTheme.typography.titleMedium)
                                 Text(s.message, Modifier.padding(16.dp))
-                                Button(onClick = { documentUri = null; viewModel.clear() }) { Text(stringResource(R.string.open_document)) }
+                                Button(onClick = { leaveEditor() }) { Text(stringResource(R.string.open_document)) }
                             }
                         }
+                        else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                     }
+                }
+                MainNavigation(
+                    backStack,
+                    bottomBar = {
+                        val cur = backStack.last()
+                        if (cur is OfficeRoute.Offline || cur is OfficeRoute.Online) BottomNavBar(backStack, pages, cur)
+                    }
+                ) {
+                    entry<OfficeRoute.Offline> {
+                        InitialScreen(
+                            viewModel = viewModel,
+                            onOpenDocument = { filePickerLauncher.launch(odfMimeTypes) },
+                            onNavigateEditor = { backStack.add(OfficeRoute.OfflineEditor()) }
+                        )
+                    }
+                    entry<OfficeRoute.Online> {
+                        OnlineTab(viewModel = viewModel, onOpenDoc = { meta ->
+                            viewModel.openOnlineDocument(meta)
+                            backStack.add(OfficeRoute.OnlineEditor(meta.docId))
+                        })
+                    }
+                    entry<OfficeRoute.OfflineEditor> { editorContent() }
+                    entry<OfficeRoute.OnlineEditor> { editorContent() }
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun InitialScreen(viewModel: OfficeViewModel, onOpenDocument: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Spacer(Modifier.height(48.dp))
-        Text("Office", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        Text("Open Document Format Viewer & Editor", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(32.dp))
+fun InitialScreen(viewModel: OfficeViewModel, onOpenDocument: () -> Unit, onNavigateEditor: () -> Unit) {
+    Scaffold(topBar = { TopAppBar(title = { Text("Office") }) }) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad).background(MaterialTheme.colorScheme.background).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Spacer(Modifier.height(24.dp))
+            Text("Open Document Format Viewer & Editor", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(32.dp))
 
-        Button(onClick = onOpenDocument, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.open_document)) }
-        Spacer(Modifier.height(4.dp))
-        Text("Opens ODF, Word/Excel/PowerPoint, CSV, TSV, Markdown & text files",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(16.dp))
+            Button(onClick = onOpenDocument, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.open_document)) }
+            Spacer(Modifier.height(4.dp))
+            Text("Opens ODF, Word/Excel/PowerPoint, CSV, TSV, Markdown & text files",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(16.dp))
 
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { viewModel.createNewTextDocument() }, Modifier.weight(1f)) { Text("New Doc") }
-            OutlinedButton(onClick = { viewModel.createNewSpreadsheet() }, Modifier.weight(1f)) { Text("New Sheet") }
-            OutlinedButton(onClick = { viewModel.createNewPresentation() }, Modifier.weight(1f)) { Text("New Slides") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { viewModel.createNewTextDocument(); onNavigateEditor() }, Modifier.weight(1f)) { Text("New Doc") }
+                OutlinedButton(onClick = { viewModel.createNewSpreadsheet(); onNavigateEditor() }, Modifier.weight(1f)) { Text("New Sheet") }
+                OutlinedButton(onClick = { viewModel.createNewPresentation(); onNavigateEditor() }, Modifier.weight(1f)) { Text("New Slides") }
+            }
         }
     }
 }
 
-/** Home with a bottom nav: Offline (local files + new docs) and Online (E2EE shared documents). */
+/** Initializes online sync once when the Online tab first appears. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(viewModel: OfficeViewModel, onOpenDocument: () -> Unit) {
-    var tab by rememberSaveable { mutableStateOf(0) }
+private fun OnlineInit(viewModel: OfficeViewModel) {
     LaunchedEffect(Unit) { viewModel.initSync() }
-    Scaffold(
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = tab == 0, onClick = { tab = 0 },
-                    icon = { Icon(painterResource(com.vayunmathur.library.R.drawable.home_24px), null) },
-                    label = { Text("Offline") }
-                )
-                NavigationBarItem(
-                    selected = tab == 1, onClick = { tab = 1 },
-                    icon = { Icon(painterResource(com.vayunmathur.library.R.drawable.outline_file_download_24), null) },
-                    label = { Text("Online") }
-                )
-            }
-        }
-    ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            if (tab == 0) InitialScreen(viewModel, onOpenDocument) else OnlineTab(viewModel)
-        }
-    }
 }
 
 /** Dialog to copy the current document into the online folder and share it with a device id. */
@@ -230,20 +279,26 @@ fun HomeScreen(viewModel: OfficeViewModel, onOpenDocument: () -> Unit) {
 fun ShareOnlineDialog(
     deviceId: String,
     isOwner: Boolean,
+    isOnline: Boolean,
+    initialName: String,
     myRole: String,
     members: List<com.vayunmathur.office.util.OfficeMember>,
-    onShare: (String, String, (String?) -> Unit) -> Unit,
+    onShare: (String, String, String, (String?) -> Unit) -> Unit,
     onSetRole: (String, String) -> Unit,
+    onTransferOwner: (String) -> Unit,
+    onRename: (String) -> Unit,
     onComputeCode: (String, (String?) -> Unit) -> Unit,
     onDismiss: () -> Unit
 ) {
     var recipient by remember { mutableStateOf("") }
+    var docName by remember { mutableStateOf(initialName) }
     var addRole by remember { mutableStateOf(com.vayunmathur.office.util.OfficeRoles.EDITOR) }
     var roleMenu by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf<String?>(null) }
     var computing by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    var memberMenu by remember { mutableStateOf<String?>(null) }
     val clipboard = LocalClipboardManager.current
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -257,11 +312,17 @@ fun ShareOnlineDialog(
                             val label = (if (m.name.isNotBlank()) m.name else m.id.take(8)) + if (m.id == deviceId) " (you)" else ""
                             Text("• $label — ${m.role}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                             if (isOwner && m.id != deviceId) {
-                                if (m.role == com.vayunmathur.office.util.OfficeRoles.EDITOR)
-                                    TextButton(onClick = { onSetRole(m.id, com.vayunmathur.office.util.OfficeRoles.VIEWER) }) { Text("Make viewer") }
-                                else
-                                    TextButton(onClick = { onSetRole(m.id, com.vayunmathur.office.util.OfficeRoles.EDITOR) }) { Text("Make editor") }
-                                TextButton(onClick = { onSetRole(m.id, com.vayunmathur.office.util.OfficeRoles.REVOKED) }) { Text("Remove") }
+                                Box {
+                                    TextButton(onClick = { memberMenu = m.id }) { Text("Manage") }
+                                    DropdownMenu(expanded = memberMenu == m.id, onDismissRequest = { memberMenu = null }) {
+                                        if (m.role == com.vayunmathur.office.util.OfficeRoles.EDITOR)
+                                            DropdownMenuItem(text = { Text("Make viewer") }, onClick = { memberMenu = null; onSetRole(m.id, com.vayunmathur.office.util.OfficeRoles.VIEWER) })
+                                        else
+                                            DropdownMenuItem(text = { Text("Make editor") }, onClick = { memberMenu = null; onSetRole(m.id, com.vayunmathur.office.util.OfficeRoles.EDITOR) })
+                                        DropdownMenuItem(text = { Text("Make owner") }, onClick = { memberMenu = null; onTransferOwner(m.id) })
+                                        DropdownMenuItem(text = { Text("Remove") }, onClick = { memberMenu = null; onSetRole(m.id, com.vayunmathur.office.util.OfficeRoles.REVOKED) })
+                                    }
+                                }
                             }
                         }
                     }
@@ -276,6 +337,22 @@ fun ShareOnlineDialog(
                         TextButton(onClick = { if (deviceId.isNotEmpty()) clipboard.setText(AnnotatedString(deviceId)) }) { Text("Copy") }
                     }
                 } else {
+                    if (!isOnline) {
+                        // Owner names the document before it first goes online.
+                        OutlinedTextField(
+                            value = docName, onValueChange = { docName = it },
+                            label = { Text("Document name") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    } else {
+                        // Already online: owner can rename; the new name is published to all members.
+                        OutlinedTextField(
+                            value = docName, onValueChange = { docName = it },
+                            label = { Text("Document name") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                        )
+                        TextButton(enabled = docName.isNotBlank() && docName.trim() != initialName, onClick = { onRename(docName.trim()) }) { Text("Rename") }
+                        Spacer(Modifier.height(8.dp))
+                    }
                     Text("Add someone by device id (copies this document into your online folder, end-to-end encrypted):")
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
@@ -315,10 +392,10 @@ fun ShareOnlineDialog(
         },
         confirmButton = {
             if (isOwner) TextButton(
-                enabled = recipient.isNotBlank() && !sharing,
+                enabled = recipient.isNotBlank() && (isOnline || docName.isNotBlank()) && !sharing,
                 onClick = {
                     sharing = true; status = null
-                    onShare(recipient.trim(), addRole) { err ->
+                    onShare(recipient.trim(), addRole, docName.trim()) { err ->
                         sharing = false
                         status = err ?: "Added ✓"
                         if (err == null) recipient = ""
@@ -334,35 +411,43 @@ fun ShareOnlineDialog(
 /** Lists documents shared by you or with you; tap to pull + open. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OnlineTab(viewModel: OfficeViewModel) {
+fun OnlineTab(viewModel: OfficeViewModel, onOpenDoc: (com.vayunmathur.office.util.OfficeDocMeta) -> Unit) {
+    OnlineInit(viewModel)
     val docs by viewModel.onlineDocs.collectAsState()
     val deviceId = viewModel.syncDeviceId
     val clipboard = LocalClipboardManager.current
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Online", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            IconButton(onClick = { viewModel.refreshOnline() }) {
-                Icon(painterResource(com.vayunmathur.library.R.drawable.refresh_24px), "Refresh")
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Online") },
+                actions = {
+                    IconButton(onClick = { viewModel.refreshOnline() }) {
+                        Icon(painterResource(com.vayunmathur.library.R.drawable.refresh_24px), "Refresh")
+                    }
+                }
+            )
+        }
+    ) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)) {
+            Text("Your device id (share this so others can send you documents):",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(deviceId.ifEmpty { "…" }, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = { if (deviceId.isNotEmpty()) clipboard.setText(AnnotatedString(deviceId)) }) { Text("Copy") }
             }
-        }
-        Text("Your device id (share this so others can send you documents):",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(deviceId.ifEmpty { "…" }, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-            TextButton(onClick = { if (deviceId.isNotEmpty()) clipboard.setText(AnnotatedString(deviceId)) }) { Text("Copy") }
-        }
-        Spacer(Modifier.height(12.dp))
-        if (docs.isEmpty()) {
-            Text("No online documents yet. Open a document and use \u201CShare\u201D to copy it here and send it to someone, or ask them to share to your device id, then tap refresh.",
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(docs) { meta ->
-                    Card(Modifier.fillMaxWidth().clickable { viewModel.openOnlineDocument(meta) }) {
-                        ListItem(
-                            headlineContent = { Text(meta.title) },
-                            supportingContent = { Text(if (meta.owner) "Shared by you" else "Shared with you") }
-                        )
+            Spacer(Modifier.height(12.dp))
+            if (docs.isEmpty()) {
+                Text("No online documents yet. Open a document and use \u201CShare\u201D to copy it here and send it to someone, or ask them to share to your device id, then tap refresh.",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(docs) { meta ->
+                        Card(Modifier.fillMaxWidth().clickable { onOpenDoc(meta) }) {
+                            ListItem(
+                                headlineContent = { Text(meta.title) },
+                                supportingContent = { Text(if (meta.owner) "Shared by you" else "Shared with you") }
+                            )
+                        }
                     }
                 }
             }
@@ -372,7 +457,7 @@ fun OnlineTab(viewModel: OfficeViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: ComponentActivity, onBack: () -> Unit) {
+fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: ComponentActivity, onBack: () -> Unit, onBecameOnline: (String) -> Unit = {}) {
     var showMetadata by remember { mutableStateOf(false) }
     var showShareDialog by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
@@ -406,6 +491,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
     var selStart by remember { mutableIntStateOf(0) }
     var selEnd by remember { mutableIntStateOf(0) }
     var fileMenu by remember { mutableStateOf(false) }
+    var exportMenu by remember { mutableStateOf(false) }
     var insertMenu by remember { mutableStateOf(false) }
     var viewMenu by remember { mutableStateOf(false) }
     // Hoisted selection for the shared bottom bar (Phase 2).
@@ -431,6 +517,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
 
     val isEditMode by viewModel.isEditMode.collectAsState()
     val hasUnsavedChanges by viewModel.hasUnsavedChanges.collectAsState()
+    val isOnline by viewModel.isOnline.collectAsState()
     val isSaving by viewModel.isSaving.collectAsState()
     val canUndo by viewModel.canUndo.collectAsState()
     val canRedo by viewModel.canRedo.collectAsState()
@@ -485,7 +572,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                 val bytes = context.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } ?: return@let
                 val name = it.lastPathSegment?.substringAfterLast('/') ?: "image.png"
                 when (document) {
-                    is OdfDocument.TextDocument -> viewModel.insertImage(maxOf(0, focusedPara), name, bytes)
+                    is OdfDocument.TextDocument -> if (focusedPara >= 0) viewModel.insertImage(focusedPara, name, bytes)
                     is OdfDocument.Presentation -> viewModel.insertImageIntoSlide(activeSlide, name, bytes)
                     is OdfDocument.Spreadsheet -> viewModel.insertImageIntoSheet(activeCell?.first ?: 0, name, bytes)
                     else -> {}
@@ -549,7 +636,11 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
         }
     }
 
-    BackHandler(enabled = hasUnsavedChanges) { showUnsavedDialog = true }
+    // Always intercept back inside a document so it returns to the home screen instead of exiting
+    // the app. Online docs sync live (nothing to save); offline docs with edits prompt to save.
+    BackHandler(enabled = true) {
+        if (!isOnline && hasUnsavedChanges) showUnsavedDialog = true else onBack()
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -591,7 +682,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                         expandedHeight = 56.dp,
                         title = { Text(document.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium) },
                         navigationIcon = {
-                            IconButton(onClick = { if (hasUnsavedChanges) showUnsavedDialog = true else onBack() }) {
+                            IconButton(onClick = { if (!isOnline && hasUnsavedChanges) showUnsavedDialog = true else onBack() }) {
                                 Icon(painterResource(com.vayunmathur.library.R.drawable.arrow_back_24px), contentDescription = "Back")
                             }
                         },
@@ -599,8 +690,10 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             if (canEdit) IconButton(onClick = { showSearch = !showSearch }) { Icon(painterResource(com.vayunmathur.library.R.drawable.outline_search_24), contentDescription = "Search") }
                             IconButton(onClick = { viewModel.undo() }, enabled = canUndo) { Icon(painterResource(com.vayunmathur.library.R.drawable.undo_24px), contentDescription = "Undo") }
                             IconButton(onClick = { viewModel.redo() }, enabled = canRedo) { Icon(painterResource(R.drawable.redo_24px), contentDescription = "Redo") }
-                            IconButton(onClick = { if (viewModel.needsSaveAs()) saveAsLauncher.launch(saveAsName) else viewModel.save() }, enabled = hasUnsavedChanges && !isSaving) {
-                                if (isSaving) CircularProgressIndicator(Modifier.size(20.dp)) else Icon(painterResource(com.vayunmathur.library.R.drawable.save_24px), contentDescription = "Save")
+                            if (!isOnline) {
+                                IconButton(onClick = { if (viewModel.needsSaveAs()) saveAsLauncher.launch(saveAsName) else viewModel.save() }, enabled = hasUnsavedChanges && !isSaving) {
+                                    if (isSaving) CircularProgressIndicator(Modifier.size(20.dp)) else Icon(painterResource(com.vayunmathur.library.R.drawable.save_24px), contentDescription = "Save")
+                                }
                             }
                         }
                     )
@@ -611,38 +704,44 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             Box {
                                 TextButton(onClick = { fileMenu = true }) { Text("File") }
                                 DropdownMenu(expanded = fileMenu, onDismissRequest = { fileMenu = false }) {
-                                    DropdownMenuItem(text = { Text("Save") }, enabled = hasUnsavedChanges, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.save_24px), null) }, onClick = { fileMenu = false; if (viewModel.needsSaveAs()) saveAsLauncher.launch(saveAsName) else viewModel.save() })
-                                    DropdownMenuItem(text = { Text("Save As…") }, onClick = { fileMenu = false; saveAsLauncher.launch(saveAsName) })
+                                    if (!isOnline) {
+                                        DropdownMenuItem(text = { Text("Save") }, enabled = hasUnsavedChanges, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.save_24px), null) }, onClick = { fileMenu = false; if (viewModel.needsSaveAs()) saveAsLauncher.launch(saveAsName) else viewModel.save() })
+                                        DropdownMenuItem(text = { Text("Save As…") }, onClick = { fileMenu = false; saveAsLauncher.launch(saveAsName) })
+                                    } else {
+                                        DropdownMenuItem(text = { Text("Synced to cloud") }, enabled = false, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.save_24px), null) }, onClick = {})
+                                    }
                                     DropdownMenuItem(text = { Text("Share online…") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.share_24px), null) }, onClick = { fileMenu = false; showShareDialog = true })
                                     DropdownMenuItem(text = { Text(stringResource(R.string.print_doc)) }, onClick = { fileMenu = false; printDocument(activity, document) })
-                                    DropdownMenuItem(text = { Text("Export to PDF…") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.outline_file_download_24), null) }, onClick = { fileMenu = false; printDocument(activity, document) })
                                     viewModel.documentUri?.let { uri ->
                                         DropdownMenuItem(text = { Text(stringResource(R.string.share)) }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.share_24px), null) }, onClick = { fileMenu = false; context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "*/*"; putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, null)) })
                                     }
-                                    DropdownMenuItem(text = { Text("Export as Text") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.outline_file_download_24), null) }, onClick = { fileMenu = false; val t = viewModel.exportAsPlainText(); if (t.isNotEmpty()) context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, t) }, null)) })
-                                    DropdownMenuItem(text = { Text("Export flat ODF…") }, onClick = { fileMenu = false; val ext = when { isTextDoc -> ".fodt"; isSpreadsheet -> ".fods"; isPresentation -> ".fodp"; else -> ".fodg" }; flatExportLauncher.launch(document.title.substringBeforeLast('.') + ext) })
+                                    DropdownMenuItem(text = { Text("Export ▸") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.outline_file_download_24), null) }, onClick = { fileMenu = false; exportMenu = true })
+                                    HorizontalDivider()
+                                    DropdownMenuItem(text = { Text("Settings") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.settings_24px), null) }, onClick = { fileMenu = false; showSettings = true })
+                                }
+                                // Export submenu (opened from File ▸ Export)
+                                DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
                                     val baseName = document.title.substringBeforeLast('.').ifBlank { "document" }
+                                    DropdownMenuItem(text = { Text("Export as Text") }, onClick = { exportMenu = false; val t = viewModel.exportAsPlainText(); if (t.isNotEmpty()) context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, t) }, null)) })
+                                    DropdownMenuItem(text = { Text("Flat ODF…") }, onClick = { exportMenu = false; val ext = when { isTextDoc -> ".fodt"; isSpreadsheet -> ".fods"; isPresentation -> ".fodp"; else -> ".fodg" }; flatExportLauncher.launch(document.title.substringBeforeLast('.') + ext) })
                                     if (isTextDoc) {
-                                        DropdownMenuItem(text = { Text("Export as Word (.docx)…") }, onClick = { fileMenu = false; exportWarning = { ooxmlExportLauncher.launch("$baseName.docx") } })
-                                        DropdownMenuItem(text = { Text("Export as PDF (.pdf)…") }, onClick = { fileMenu = false; exportWarning = { pdfExportLauncher.launch("$baseName.pdf") } })
-                                        DropdownMenuItem(text = { Text("Export as HTML (.html)…") }, onClick = { fileMenu = false; exportWarning = { htmlExportLauncher.launch("$baseName.html") } })
-                                        DropdownMenuItem(text = { Text("Export as Rich Text (.rtf)…") }, onClick = { fileMenu = false; exportWarning = { rtfExportLauncher.launch("$baseName.rtf") } })
-                                        DropdownMenuItem(text = { Text("Export as EPUB (.epub)…") }, onClick = { fileMenu = false; exportWarning = { epubExportLauncher.launch("$baseName.epub") } })
-                                        DropdownMenuItem(text = { Text("Export as LaTeX (.tex)…") }, onClick = { fileMenu = false; exportWarning = { latexExportLauncher.launch("$baseName.tex") } })
-                                        DropdownMenuItem(text = { Text("Export as Markdown (.md)…") }, onClick = { fileMenu = false; exportWarning = { markdownExportLauncher.launch("$baseName.md") } })
-                                        DropdownMenuItem(text = { Text("Export as Text (.txt)…") }, onClick = { fileMenu = false; exportWarning = { txtExportLauncher.launch("$baseName.txt") } })
+                                        DropdownMenuItem(text = { Text("Word (.docx)…") }, onClick = { exportMenu = false; exportWarning = { ooxmlExportLauncher.launch("$baseName.docx") } })
+                                        DropdownMenuItem(text = { Text("PDF (.pdf)…") }, onClick = { exportMenu = false; exportWarning = { pdfExportLauncher.launch("$baseName.pdf") } })
+                                        DropdownMenuItem(text = { Text("HTML (.html)…") }, onClick = { exportMenu = false; exportWarning = { htmlExportLauncher.launch("$baseName.html") } })
+                                        DropdownMenuItem(text = { Text("Rich Text (.rtf)…") }, onClick = { exportMenu = false; exportWarning = { rtfExportLauncher.launch("$baseName.rtf") } })
+                                        DropdownMenuItem(text = { Text("EPUB (.epub)…") }, onClick = { exportMenu = false; exportWarning = { epubExportLauncher.launch("$baseName.epub") } })
+                                        DropdownMenuItem(text = { Text("LaTeX (.tex)…") }, onClick = { exportMenu = false; exportWarning = { latexExportLauncher.launch("$baseName.tex") } })
+                                        DropdownMenuItem(text = { Text("Markdown (.md)…") }, onClick = { exportMenu = false; exportWarning = { markdownExportLauncher.launch("$baseName.md") } })
+                                        DropdownMenuItem(text = { Text("Text (.txt)…") }, onClick = { exportMenu = false; exportWarning = { txtExportLauncher.launch("$baseName.txt") } })
                                     }
                                     if (isSpreadsheet) {
-                                        DropdownMenuItem(text = { Text("Export as Excel (.xlsx)…") }, onClick = { fileMenu = false; exportWarning = { ooxmlExportLauncher.launch("$baseName.xlsx") } })
-                                        DropdownMenuItem(text = { Text("Export as CSV…") }, onClick = { fileMenu = false; exportWarning = { csvExportLauncher.launch("$baseName.csv") } })
-                                        DropdownMenuItem(text = { Text("Export as TSV…") }, onClick = { fileMenu = false; exportWarning = { tsvExportLauncher.launch("$baseName.tsv") } })
+                                        DropdownMenuItem(text = { Text("Excel (.xlsx)…") }, onClick = { exportMenu = false; exportWarning = { ooxmlExportLauncher.launch("$baseName.xlsx") } })
+                                        DropdownMenuItem(text = { Text("CSV…") }, onClick = { exportMenu = false; exportWarning = { csvExportLauncher.launch("$baseName.csv") } })
+                                        DropdownMenuItem(text = { Text("TSV…") }, onClick = { exportMenu = false; exportWarning = { tsvExportLauncher.launch("$baseName.tsv") } })
                                     }
                                     if (isPresentation) {
-                                        DropdownMenuItem(text = { Text("Export as PowerPoint (.pptx)…") }, onClick = { fileMenu = false; exportWarning = { ooxmlExportLauncher.launch("$baseName.pptx") } })
+                                        DropdownMenuItem(text = { Text("PowerPoint (.pptx)…") }, onClick = { exportMenu = false; exportWarning = { ooxmlExportLauncher.launch("$baseName.pptx") } })
                                     }
-                                    HorizontalDivider()
-                                    DropdownMenuItem(text = { Text(stringResource(R.string.document_info)) }, onClick = { fileMenu = false; showMetadata = true })
-                                    DropdownMenuItem(text = { Text("Settings") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.settings_24px), null) }, onClick = { fileMenu = false; showSettings = true })
                                 }
                             }
                             // Edit menu removed: Search moved to a top-bar icon; paragraph ops live in the bottom bar's ⋮ menu.
@@ -650,25 +749,23 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             if (isTextDoc) Box {
                                 TextButton(onClick = { insertMenu = true }) { Text("Insert") }
                                 DropdownMenu(expanded = insertMenu, onDismissRequest = { insertMenu = false }) {
-                                    DropdownMenuItem(text = { Text("Paragraph") }, leadingIcon = { Icon(painterResource(com.vayunmathur.library.R.drawable.add_24px), null) }, onClick = { insertMenu = false; viewModel.addParagraphAfter(maxOf(0, focusedPara)) })
-                                    DropdownMenuItem(text = { Text("Image…") }, onClick = { insertMenu = false; imagePickerLauncher.launch("image/*") })
-                                    DropdownMenuItem(text = { Text("Hyperlink") }, onClick = { insertMenu = false; showInsertLink = true })
-                                    DropdownMenuItem(text = { Text("Chart") }, onClick = { insertMenu = false; editingChartBlock = -1; showChartEditor = true })
-                                    DropdownMenuItem(text = { Text("Special character…") }, onClick = { insertMenu = false; showSpecialChars = true })
-                                    DropdownMenuItem(text = { Text("Date (field)") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "date", viewModel.fieldDisplayValue("date")) })
-                                    DropdownMenuItem(text = { Text("Time (field)") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "time", viewModel.fieldDisplayValue("time")) })
-                                    DropdownMenuItem(text = { Text("Page number") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "page-number", viewModel.fieldDisplayValue("page-number")) })
-                                    DropdownMenuItem(text = { Text("Page count") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "page-count", viewModel.fieldDisplayValue("page-count")) })
-                                    DropdownMenuItem(text = { Text("File name") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "file-name", viewModel.fieldDisplayValue("file-name")) })
-                                    DropdownMenuItem(text = { Text("Author") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "author-name", viewModel.fieldDisplayValue("author-name")) })
-                                    DropdownMenuItem(text = { Text("Title (field)") }, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "title", viewModel.fieldDisplayValue("title")) })
-                                    DropdownMenuItem(text = { Text("Bookmark") }, onClick = { insertMenu = false; showAddBookmark = true })
-                                    DropdownMenuItem(text = { Text("Footnote…") }, onClick = { insertMenu = false; showFootnote = true })
+                                    DropdownMenuItem(text = { Text("Image…") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; imagePickerLauncher.launch("image/*") })
+                                    DropdownMenuItem(text = { Text("Chart") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; editingChartBlock = -1; showChartEditor = true })
+                                    DropdownMenuItem(text = { Text("Special character…") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; showSpecialChars = true })
+                                    DropdownMenuItem(text = { Text("Date (field)") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "date", viewModel.fieldDisplayValue("date")) })
+                                    DropdownMenuItem(text = { Text("Time (field)") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "time", viewModel.fieldDisplayValue("time")) })
+                                    DropdownMenuItem(text = { Text("Page number") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "page-number", viewModel.fieldDisplayValue("page-number")) })
+                                    DropdownMenuItem(text = { Text("Page count") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "page-count", viewModel.fieldDisplayValue("page-count")) })
+                                    DropdownMenuItem(text = { Text("File name") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "file-name", viewModel.fieldDisplayValue("file-name")) })
+                                    DropdownMenuItem(text = { Text("Author") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "author-name", viewModel.fieldDisplayValue("author-name")) })
+                                    DropdownMenuItem(text = { Text("Title (field)") }, enabled = activeRunStart >= 0, onClick = { insertMenu = false; if (activeRunStart >= 0) viewModel.insertFieldInRun(activeRunStart, activeRunEnd, selStart, "title", viewModel.fieldDisplayValue("title")) })
+                                    DropdownMenuItem(text = { Text("Bookmark") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; showAddBookmark = true })
+                                    DropdownMenuItem(text = { Text("Footnote…") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; showFootnote = true })
                                     DropdownMenuItem(text = { Text("Comment…") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; showComment = true })
-                                    DropdownMenuItem(text = { Text("Table of contents") }, onClick = { insertMenu = false; viewModel.insertTableOfContents() })
+                                    DropdownMenuItem(text = { Text("Table of contents") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; viewModel.insertTableOfContents(focusedPara) })
                                     DropdownMenuItem(text = { Text("Header & footer…") }, onClick = { insertMenu = false; showHeaderFooter = true })
-                                    DropdownMenuItem(text = { Text("Horizontal line") }, onClick = { insertMenu = false; viewModel.insertHorizontalLine(maxOf(0, focusedPara)) })
-                                    DropdownMenuItem(text = { Text("Page break") }, onClick = { insertMenu = false; viewModel.insertPageBreak(maxOf(0, focusedPara)) })
+                                    DropdownMenuItem(text = { Text("Horizontal line") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; viewModel.insertHorizontalLine(focusedPara) })
+                                    DropdownMenuItem(text = { Text("Page break") }, enabled = focusedPara >= 0, onClick = { insertMenu = false; viewModel.insertPageBreak(focusedPara) })
                                 }
                             }
                             // Format menu removed: font size, clear formatting, and list level/restart moved to the bottom bar's ⋮ menu.
@@ -814,13 +911,15 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                         modifier = Modifier.align(Alignment.TopCenter).zIndex(1f).fillMaxWidth()
                     ) {
                         Text(
-                            presence.joinToString(", ") { it.name + if (it.typing) " (typing…)" else "" }
+                            presence.joinToString(", ") { it.name + (it.loc?.let { l -> " · $l" } ?: "") + if (it.typing) " (typing…)" else "" }
                                 .let { "Online: $it" },
                             style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                         )
                     }
                 }
+                OfficeLightTheme {
+                  Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 when (document) {
                     is OdfDocument.TextDocument -> TextDocumentView(doc = document, searchQuery = searchQuery, fontSizeMultiplier = fontSizeMultiplier, listState = listState,
                         remoteCarets = remoteCarets,
@@ -832,6 +931,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                             val p = (document.content.getOrNull(idx) as? OdfContentBlock.Paragraph)?.paragraph
                             if (p != null) viewModel.setCheckboxChecked(idx, !p.listChecked)
                         },
+                        onDeletePrevBlock = { runStart -> viewModel.deleteBlockBefore(runStart) },
                         onCellTextChange = { bi, r, c, text -> viewModel.updateTextTableCell(bi, r, c, text) },
                         onCellFocus = { bi, r, c -> activeTableBlock = bi; activeTableRow = r; activeTableCol = c },
                         onChartClick = { bi -> editingChartBlock = bi; showChartEditor = true },
@@ -845,7 +945,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                         onCellAlignment = { s, r, c, a -> viewModel.setCellAlignment(s, r, c, a) },
                         onMergeCells = { s, sr, sc, er, ec -> viewModel.mergeCells(s, sr, sc, er, ec) }, onUnmergeCells = { s, r, c -> viewModel.unmergeCells(s, r, c) },
                         onSort = { s, col, asc -> viewModel.sortRows(s, col, asc) },
-                        onCellSelected = { s, r, c -> activeCell = Triple(s, r, c) },
+                        onCellSelected = { s, r, c -> activeCell = Triple(s, r, c); viewModel.setLocalLocation("Sheet ${s + 1} · ${('A' + c)}${r + 1}") },
                         onFloatingBoundsChange = { s, e, x, y, w, h -> viewModel.setSheetElementBounds(s, e, x, y, w, h) },
                         onFloatingTextChange = { s, e, t -> viewModel.updateSheetElementText(s, e, t) },
                         onFloatingDelete = { s, e -> viewModel.deleteSheetElement(s, e) },
@@ -858,10 +958,12 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                         onElementBoundsChange = { s, e, x, y, w, h -> viewModel.setSlideElementBounds(s, e, x, y, w, h) },
                         onDeleteElement = { s, e -> viewModel.deleteSlideElement(s, e) },
                         selectedElement = activeSlideEl,
-                        onSlideChange = { activeSlide = it },
+                        onSlideChange = { activeSlide = it; viewModel.setLocalLocation("Slide ${it + 1}") },
                         onElementSelected = { s, e -> activeSlide = s; activeSlideEl = e },
                         onCropImage = { s, e -> cropSlideTarget = s to e })
                     is OdfDocument.Drawing -> DrawingView(document)
+                }
+                  }
                 }
                 // Night reading mode: a view-only dimming scrim (does not modify or save the document). (C4)
                 if (nightMode) Box(Modifier.matchParentSize().background(Color(0x660E1116)))
@@ -877,11 +979,16 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
         ShareOnlineDialog(
             deviceId = viewModel.syncDeviceId,
             isOwner = viewModel.currentDocRole() == com.vayunmathur.office.util.OfficeRoles.OWNER,
+            isOnline = isOnline,
+            initialName = document.title,
             myRole = viewModel.currentDocRole(),
             members = members,
-            onShare = { recipientId, role, cb ->
-                viewModel.shareCurrentDocument(recipientId, role) { err ->
-                    if (err == null) viewModel.documentMembers { members = it } // refresh roster on success
+            onShare = { recipientId, role, name, cb ->
+                viewModel.shareCurrentDocument(recipientId, role, name) { err ->
+                    if (err == null) {
+                        viewModel.documentMembers { members = it } // refresh roster on success
+                        viewModel.currentOnlineDocId()?.let { onBecameOnline(it) } // now a cloud doc
+                    }
                     cb(err)
                 }
             },
@@ -889,6 +996,10 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                 viewModel.setMemberRole(memberId, role) {
                     viewModel.documentMembers { members = it }
                 }
+            },
+            onRename = { name -> viewModel.renameDocument(name) },
+            onTransferOwner = { memberId ->
+                viewModel.transferOwnership(memberId) { viewModel.documentMembers { members = it } }
             },
             onComputeCode = { id, cb -> viewModel.securityCodeWith(id, cb) },
             onDismiss = { showShareDialog = false }
@@ -1141,7 +1252,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                     chartForSlide -> viewModel.insertChartIntoSlide(activeSlide, ch)
                     chartForSheet -> viewModel.insertChartIntoSheet(activeCell?.first ?: 0, ch)
                     editingChartBlock >= 0 -> viewModel.updateChart(editingChartBlock, ch)
-                    else -> viewModel.insertChart(maxOf(0, focusedPara), ch)
+                    else -> if (focusedPara >= 0) viewModel.insertChart(focusedPara, ch)
                 }
             },
             onDismiss = { showChartEditor = false; editingChartBlock = -1; chartForSlide = false; chartForSheet = false }
