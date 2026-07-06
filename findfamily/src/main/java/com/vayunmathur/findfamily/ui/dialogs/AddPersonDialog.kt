@@ -168,10 +168,11 @@ fun String.decodeBase26(): Long = decodeBase26OrNull() ?: 0L
 fun String.decodeBase26OrNull(): Long? {
     val clean = sanitizeFindFamilyId(this)
     if (clean.isBlank()) return null
-    val value = clean.fold(0uL) { acc, c ->
-        acc * 26uL + (c.code - 65).toULong()
+    var value = 0uL
+    for (c in clean) {
+        value = value * 26uL + (c.code - 65).toULong()
     }
-    return value.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
+    return value.toLong()   // bit-reinterpret back, mirroring encodeBase26's toULong()
 }
 
 fun Long.encodeBase26(): String = buildString {

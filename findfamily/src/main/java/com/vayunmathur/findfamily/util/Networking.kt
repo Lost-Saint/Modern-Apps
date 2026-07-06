@@ -30,6 +30,7 @@ object Networking {
     private lateinit var identity: E2eeIdentity
     private var network_is_down = false
 
+    @Volatile
     var userid = 0L
         private set
 
@@ -49,9 +50,9 @@ object Networking {
         // Loads the persisted keypair (or generates+stores one on first launch) using the same
         // "publicKey"/"privateKey" datastore entries as before, so existing installs keep their key.
         identity = E2eeIdentity.loadOrCreate(DataStoreKeyStore(dataStoreUtils))
-        val generatedUserId = Random.nextLong()
-        dataStoreUtils.setLong("userid", generatedUserId, true)
-        userid = dataStoreUtils.getLong("userid") ?: generatedUserId
+        userid = dataStoreUtils.getLong("userid") ?: Random.nextLong(0, Long.MAX_VALUE).also {
+            dataStoreUtils.setLong("userid", it, true)
+        }
 
         if (userDao.getById(userid) == null) {
             userDao.upsert(

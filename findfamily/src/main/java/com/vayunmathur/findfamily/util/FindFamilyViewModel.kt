@@ -217,7 +217,7 @@ class FindFamilyViewModel(
         _selectedWaypointId.value = 0L
         _waypointName.value = ""
         _waypointRange.value = "100"
-        _waypointCoord.value = latestLocationByUser.value[Networking.userid]?.coord ?: Coord(0.0, 0.0)
+        _waypointCoord.value = latestLocationByUser.value[_selfUserId.value]?.coord ?: Coord(0.0, 0.0)
     }
 
     /** Begin editing an existing waypoint, prefilling the form. */
