@@ -17,6 +17,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.findfamily.R
 import com.vayunmathur.findfamily.data.Coord
 import com.vayunmathur.findfamily.data.LocationValue
 import com.vayunmathur.findfamily.data.LocationValueDao
@@ -27,6 +28,7 @@ import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.data.UserDao
 import com.vayunmathur.findfamily.data.Waypoint
 import com.vayunmathur.findfamily.data.WaypointDao
+import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DatabaseHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -109,6 +111,9 @@ class FindFamilyViewModel(
     val usersById: StateFlow<Map<Long, User>> = userDao.getAllFlow()
         .map { list -> list.associateBy { it.id } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    private val _selfUserId = MutableStateFlow(Networking.userid)
+    val selfUserId: StateFlow<Long> = _selfUserId.asStateFlow()
 
     /** Names of the users currently located at each location/waypoint name. */
     val usersByLocationName: StateFlow<Map<String, List<String>>> = userDao.getAllFlow()
@@ -408,6 +413,12 @@ class FindFamilyViewModel(
     // ------------------------------------------------------------------
 
     init {
+        // Networking identity/user id must exist before UI such as Add Person
+        // can show the local FindFamily ID.
+        viewModelScope.launch(Dispatchers.IO) {
+            Networking.init(userDao, DataStoreUtils.getInstance(ctx), ctx.getString(R.string.me_label))
+            _selfUserId.value = Networking.userid
+        }
         // Trim location history older than a week.
         viewModelScope.launch(Dispatchers.IO) {
             val cutoff = Clock.System.now() - 7.days

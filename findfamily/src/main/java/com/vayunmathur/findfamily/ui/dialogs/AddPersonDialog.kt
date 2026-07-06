@@ -42,11 +42,12 @@ fun AddPersonDialog(
     id: Long?,
 ) {
     val usersByID by ffViewModel.usersById.collectAsState()
+    val myUserId by ffViewModel.selfUserId.collectAsState()
 
     var userid: String by remember { mutableStateOf(id?.encodeBase26() ?: "") }
     var contactName: String? by remember { mutableStateOf(null) }
     var contactPhoto by remember { mutableStateOf<String?>(null) }
-    val myId = Networking.userid.encodeBase26()
+    val myId = myUserId.encodeBase26()
     val shareMyIdText = stringResource(R.string.share_my_id_message, myId)
     val requestPickContact2 = platform.requestPickContact { name, photo ->
         contactName = name
@@ -74,10 +75,10 @@ fun AddPersonDialog(
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton({ platform.copy(myId) }) {
+                    OutlinedButton({ platform.copy(myId) }, enabled = myId.isNotBlank()) {
                         Text(stringResource(R.string.copy_id))
                     }
-                    OutlinedButton({ platform.shareText(shareMyIdText) }) {
+                    OutlinedButton({ platform.shareText(shareMyIdText) }, enabled = myId.isNotBlank()) {
                         IconShare()
                         Text(stringResource(R.string.share_my_id))
                     }
@@ -93,7 +94,7 @@ fun AddPersonDialog(
                         when (userStatus) {
                             RequestStatus.AWAITING_REQUEST -> { @Composable {Text(stringResource(R.string.status_awaiting_request))}}
                             RequestStatus.MUTUAL_CONNECTION -> {
-                                if (userid == Networking.userid.encodeBase26())
+                                if (userid == myId)
                                     {@Composable {Text(stringResource(R.string.status_cannot_share_self))}}
                                 else {@Composable {Text(stringResource(R.string.status_already_sharing))}}
                             }
