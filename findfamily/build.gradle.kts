@@ -1,6 +1,5 @@
 plugins {
     id("common-conventions-app")
-    alias(libs.plugins.ksp)
 }
 
 android {
@@ -10,14 +9,12 @@ android {
 }
 
 dependencies {
-
     // ktor
     implementation(project(":library:network"))
     implementation(project(":library:e2ee-p2p"))
 
     implementRoom(libs)
 
-    implementation(libs.androidx.work.runtime.ktx)
     implementation(project(":library:work"))
 
     implementation(libs.coil.compose)

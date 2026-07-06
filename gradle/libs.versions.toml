@@ -20,7 +20,6 @@ datastorePreferences = "1.2.1"
 # Compose & UI Foundations
 composeBom = "2026.05.01"
 activityCompose = "1.13.0"
-material3 = "1.5.0-alpha21"
 reorderable = "3.1.0"
 material = "1.14.0"
 wearComposeMaterial = "1.5.4"
@@ -68,6 +67,7 @@ onnxruntimeAndroid = "1.19.2"
 
 [libraries]
 # AndroidX Core & Lifecycle
+androidx-core = { group = "androidx.core", name = "core", version.ref = "coreKtx" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-fragment-ktx = { group = "androidx.fragment", name = "fragment-ktx", version = "1.8.9" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
@@ -90,9 +90,10 @@ jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
 
 # Jetpack Compose (BOM Managed)
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-bom-alpha = { group = "androidx.compose", name = "compose-bom-alpha", version.ref = "composeBom" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
-androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-wear-compose-material = { group = "androidx.wear.compose", name = "compose-material", version.ref = "wearComposeMaterial" }
 androidx-wear-compose-foundation = { group = "androidx.wear.compose", name = "compose-foundation", version.ref = "wearComposeMaterial" }

@@ -100,7 +100,7 @@ dependencies {
     // AndroidX Core & Lifecycle
     implementation(libs.okio)
     implementation(libs.kotlinx.datetime)
-    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
 
